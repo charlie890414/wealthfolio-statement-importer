@@ -201,7 +201,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   }
 
   return <div className="p-6 max-w-7xl mx-auto space-y-5">
-    <div><h1 className="text-3xl font-bold">CSV 對帳單匯入</h1><p className="text-muted-foreground mt-1">支援富邦複委託、永豐、Schwab 與基富通。</p></div>
+    <div><h1 className="text-3xl font-bold">對帳單匯入</h1><p className="text-muted-foreground mt-1">支援富邦複委託、永豐、Schwab 與基富通。</p></div>
     <section className="border rounded-lg p-5 space-y-4">
       <label className="block font-medium">1. 選擇 Wealthfolio 帳戶<select className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background" value={accountId} onChange={(event) => { setAccountId(event.target.value); setActivities([]); setSelectedRows(new Set()); setFileName(''); setBroker(''); setIssues([]); setImportResult(''); invalidateValidation(); }} disabled={busy}>
         <option value="">請選擇帳戶</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}（{account.currency}）</option>)}
@@ -223,5 +223,5 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
 }
 
 const AddonRoute = () => <QueryClientProvider client={addonCtx!.api.query.getClient() as QueryClient}><ImportPage ctx={addonCtx!} /></QueryClientProvider>;
-const enable: AddonEnableFunction = (ctx) => { addonCtx = ctx; ctx.router.add({ id: 'statement-csv-importer', path: '/addons/statement-csv-importer', component: AddonRoute }); ctx.onDisable(() => { addonCtx = undefined; }); };
+const enable: AddonEnableFunction = (ctx) => { addonCtx = ctx; ctx.router.add({ id: 'wealthfolio-statement-importer', path: '/addons/wealthfolio-statement-importer', component: AddonRoute }); ctx.onDisable(() => { addonCtx = undefined; }); };
 export default enable;

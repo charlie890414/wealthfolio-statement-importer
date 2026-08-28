@@ -1,6 +1,6 @@
 {
-  "id": "statement-csv-importer",
-  "name": "CSV 對帳單匯入",
+  "id": "wealthfolio-statement-importer",
+  "name": "對帳單匯入",
   "version": "1.0.1",
   "description": "將富邦、永豐、Schwab 與基富通 CSV 對帳單轉換並匯入 Wealthfolio",
   "author": "charlie890414",
@@ -9,13 +9,13 @@
   "minWealthfolioVersion": "3.7.0",
   "enabled": true,
   "contributes": {
-    "routes": [{ "id": "statement-csv-importer" }],
+    "routes": [{ "id": "wealthfolio-statement-importer" }],
     "links": {
       "sidebar": [
         {
-          "id": "statement-csv-importer",
-          "route": "statement-csv-importer",
-          "label": "CSV 對帳單匯入",
+          "id": "wealthfolio-statement-importer",
+          "route": "wealthfolio-statement-importer",
+          "label": "對帳單匯入",
           "icon": "chart-line",
           "order": 100
         }

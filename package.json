@@ -1,5 +1,5 @@
 {
-  "name": "wealthfolio-statement-csv-importer-addon",
+  "name": "wealthfolio-wealthfolio-statement-importer-addon",
   "version": "1.0.1",
   "description": "Convert and import Fubon, SinoPac, Schwab, and FundRich CSV statements into Wealthfolio",
   "type": "module",
