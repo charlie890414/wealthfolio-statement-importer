@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { ActivityImport } from '@wealthfolio/addon-sdk';
 import type { ConversionIssue, NormalizedActivity } from './types';
 
-const activityTypes = ['BUY', 'SELL', 'SPLIT', 'DIVIDEND', 'INTEREST', 'DEPOSIT', 'WITHDRAWAL', 'TRANSFER_IN', 'TRANSFER_OUT', 'FEE', 'TAX', 'CREDIT', 'ADJUSTMENT', 'UNKNOWN'] as const;
+const activityTypes = ['BUY', 'SELL', 'SPLIT', 'DIVIDEND', 'INTEREST', 'DEPOSIT', 'WITHDRAWAL', 'FEE', 'TAX', 'CREDIT', 'ADJUSTMENT', 'UNKNOWN'] as const;
 
 export const activityImportSchema = z.object({
   accountId: z.string().min(1), activityType: z.enum(activityTypes), isValid: z.boolean(), isDraft: z.boolean(),

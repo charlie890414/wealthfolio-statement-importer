@@ -17,9 +17,10 @@ export interface ExistingActivityForDedupe {
   fee?: string | number | null;
   tax?: string | number | null;
   currency?: string | null;
+  notes?: string | null;
 }
 
-const CASH_TYPES = new Set(['DEPOSIT', 'WITHDRAWAL', 'FEE', 'TAX', 'CREDIT', 'INTEREST']);
+const CASH_TYPES = new Set(['DEPOSIT', 'WITHDRAWAL', 'FEE', 'TAX', 'CREDIT', 'INTEREST', 'DIVIDEND']);
 const ZERO_DECIMAL_CURRENCIES = new Set(['JPY', 'KRW', 'TWD', 'VND']);
 const text = (value: unknown) => String(value ?? '').trim();
 const dateOnly = (value: unknown, timezone?: string) => {
@@ -51,6 +52,15 @@ const decimal = (value: unknown) => {
 };
 const field = (value: unknown) => decimal(value) || '';
 const zeroField = (value: unknown) => field(value) || '0';
+const normalizedSubtype = (value: unknown) => {
+  const subtype = text(value).toUpperCase();
+  return ({
+    POSITION_OPEN: 'OPTION_OPEN',
+    POSITION_CLOSE: 'OPTION_CLOSE',
+    OPTION_EXPIRY: 'OPTION_EXPIRE',
+    'OPTION EXPIRY': 'OPTION_EXPIRE',
+  } as Record<string, string>)[subtype] ?? subtype;
+};
 const totalCost = (activity: ActivityImport | ExistingActivityForDedupe) => {
   try {
     return new Big(field(activity.fee) || 0)
@@ -72,9 +82,24 @@ const assetKeys = (activity: ActivityImport | ExistingActivityForDedupe) => {
     text((activity as ExistingActivityForDedupe).assetSymbol),
     text(activity.assetId),
   ].filter(Boolean).map((value) => value.toUpperCase());
+  const subtype = normalizedSubtype(activity.subtype);
+  const description = text((activity as ActivityImport).comment || (activity as ExistingActivityForDedupe).notes)
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+  // Some historical Wealthfolio rows have no asset_id/symbol for options.
+  // Their normalized description is still a stable identity shared with the
+  // Schwab export, so use it as a fallback only for options or symbol-less rows.
+  if (description && (!values.length || subtype.startsWith('OPTION_'))) values.push(`NOTE:${description}`);
   return [...new Set(values.length ? values : [''])];
 };
 const sameValues = (left: unknown, right: unknown) => field(left) === field(right);
+const optionMultiplier = (activity: ActivityImport | ExistingActivityForDedupe) => {
+  const subtype = normalizedSubtype(activity.subtype);
+  const symbols = assetKeys(activity);
+  return subtype.startsWith('OPTION_') || symbols.some((symbol) => /^[A-Z0-9]{1,6}\d{6}[CP]\d{8}$/.test(symbol))
+    ? new Big(100)
+    : new Big(1);
+};
 
 /** Explains why a same-day, same-asset activity was not marked duplicate. */
 export function sameDayNonDuplicateReason(
@@ -90,11 +115,11 @@ export function sameDayNonDuplicateReason(
   const batchCandidates: ExistingActivityForDedupe[] = related
     .filter((item) => item !== activity)
     .map((item, index) => ({ ...item, id: `batch-${item.lineNumber ?? index}` }));
-  const candidates = [...existing, ...batchCandidates].filter((item) =>
-    (text(item.accountId) || accountId) === accountId &&
-    dateOnly(item.date, timezone) === date &&
-    assetKeys(item).some((asset) => assets.has(asset)),
-  );
+  const candidates = [...existing, ...batchCandidates].filter((item) => {
+    if ((text(item.accountId) || accountId) !== accountId || dateOnly(item.date, timezone) !== date) return false;
+    const itemType = text(item.activityType).toUpperCase();
+    return CASH_TYPES.has(type) ? itemType === type : assetKeys(item).some((asset) => assets.has(asset));
+  });
   if (!candidates.length) return undefined;
   const item = candidates[0];
   if (text(item.activityType).toUpperCase() !== type) return `同日同標的，但買賣類型不同（${type || '—'}／${text(item.activityType).toUpperCase() || '—'}）`;
@@ -102,7 +127,7 @@ export function sameDayNonDuplicateReason(
   if (!sameValues(activity.unitPrice, item.unitPrice)) return `同日同標的，但單價不同（${text(activity.unitPrice) || '—'}／${text(item.unitPrice) || '—'}）`;
   if (!sameValues(activity.fee, item.fee) || !sameValues((activity as ActivityImport & { tax?: unknown }).tax, item.tax)) return '同日同標的，但費用或稅額不同';
   if (!sameValues(activity.amount, item.amount)) return `同日同標的，但金額不同（${text(activity.amount) || '—'}／${text(item.amount) || '—'}）`;
-  if (text(activity.subtype).toUpperCase() !== text(item.subtype).toUpperCase()) return '同日同標的，但活動子類型不同';
+  if (normalizedSubtype(activity.subtype) !== normalizedSubtype(item.subtype)) return '同日同標的，但活動子類型不同';
   return '同日同標的，但交易內容不同';
 }
 const tradeSettlementKeys = (
@@ -127,7 +152,7 @@ const tradeSettlementKeys = (
   const quantity = field(activity.quantity);
   const unitPrice = field(activity.unitPrice);
   if (quantity && unitPrice) {
-    const gross = new Big(quantity).times(unitPrice);
+    const gross = new Big(quantity).times(unitPrice).times(optionMultiplier(activity));
     candidates.push(roundedMoney(settlementAmount(type, gross, cost), currency));
   }
   return [...new Set(candidates.length ? candidates : [''])];
@@ -140,17 +165,23 @@ function keys(
   timezone?: string,
 ) {
   const type = text(activity.activityType).toUpperCase();
-  const isCash = CASH_TYPES.has(type) && !text((activity as ActivityImport).assetId || (activity as ExistingActivityForDedupe).assetId);
+  const isCash = CASH_TYPES.has(type);
   const currency = text(activity.currency).toUpperCase();
   const common = [
     accountId,
     dateOnly(activity.date, timezone),
     type,
-    text(activity.subtype).toUpperCase(),
+    normalizedSubtype(activity.subtype),
     currency,
   ];
   if (isCash) {
-    return [[...common, field(activity.amount), field(activity.fee), zeroField((activity as ExistingActivityForDedupe).tax)].join('|')];
+    const base = [...common, zeroField(activity.amount), zeroField(activity.fee), zeroField((activity as ExistingActivityForDedupe).tax)];
+    const result = [base.join('|')];
+    // Keep a more specific key as a secondary candidate when the broker
+    // provides a ticker. The amount-only key remains the fallback for older
+    // DB rows whose cash activity is attached to a different asset (or none).
+    for (const asset of assetKeys(activity)) result.push([...common, asset, ...base.slice(common.length)].join('|'));
+    return [...new Set(result)];
   }
   const cost = totalCost(activity).toString();
   const result: string[] = [];
@@ -178,7 +209,7 @@ export function markExistingDuplicates(
     }
   }
   const consumed = new Set<string>();
-  return activities.map((activity) => {
+  const matched = activities.map((activity) => {
     if (activity.duplicateOfId || activity.duplicateOfLineNumber) return activity;
     let id: string | undefined;
     for (const activityKey of keys(activity, accountId, 'import', timezone)) {
@@ -190,4 +221,78 @@ export function markExistingDuplicates(
     consumed.add(id);
     return { ...activity, duplicateOfId: id, warnings: { ...(activity.warnings ?? {}), _duplicate: ['Duplicate activity already exists'] } };
   });
+
+  // Older imports may merge same-day fills into a single weighted-average
+  // activity. Compare the remaining trade groups economically so a split CSV
+  // group can be recognized as already covered by one merged database row.
+  const groupKey = (activity: ActivityImport | ExistingActivityForDedupe, fallbackAccountId: string) => {
+    const type = text(activity.activityType).toUpperCase();
+    if (type !== 'BUY' && type !== 'SELL') return '';
+    const asset = assetKeys(activity).find((value) => value) ?? '';
+    if (!asset) return '';
+    return [
+      text((activity as ExistingActivityForDedupe).accountId) || fallbackAccountId,
+      dateOnly(activity.date, timezone),
+      type,
+      normalizedSubtype(activity.subtype),
+      text(activity.currency).toUpperCase(),
+      asset,
+    ].join('|');
+  };
+  const aggregate = (items: Array<ActivityImport | ExistingActivityForDedupe>) => {
+    let quantity = new Big(0);
+    let settlement = new Big(0);
+    let cost = new Big(0);
+    for (const item of items) {
+      const itemQuantity = new Big(field(item.quantity) || 0);
+      const itemCost = totalCost(item);
+      const itemType = text(item.activityType).toUpperCase();
+      const unitPrice = field(item.unitPrice);
+      const gross = unitPrice
+        ? itemQuantity.times(unitPrice).times(optionMultiplier(item))
+        : new Big(field(item.amount) || 0);
+      quantity = quantity.plus(itemQuantity);
+      cost = cost.plus(itemCost);
+      settlement = settlement.plus(settlementAmount(itemType, gross, itemCost));
+    }
+    return { quantity, settlement, cost };
+  };
+  const importGroups = new Map<string, number[]>();
+  matched.forEach((activity, index) => {
+    if (activity.duplicateOfId || activity.duplicateOfLineNumber) return;
+    const key = groupKey(activity, accountId);
+    if (!key) return;
+    importGroups.set(key, [...(importGroups.get(key) ?? []), index]);
+  });
+  const existingGroups = new Map<string, ExistingActivityForDedupe[]>();
+  existing.forEach((item) => {
+    if (consumed.has(item.id)) return;
+    const key = groupKey(item, accountId);
+    if (!key) return;
+    existingGroups.set(key, [...(existingGroups.get(key) ?? []), item]);
+  });
+  for (const [key, indexes] of importGroups) {
+    const existingItems = existingGroups.get(key);
+    if (!existingItems?.length || indexes.length < 2) continue;
+    const importedTotal = aggregate(indexes.map((index) => matched[index]));
+    const existingTotal = aggregate(existingItems);
+    const currency = text(matched[indexes[0]].currency).toUpperCase();
+    if (
+      importedTotal.quantity.round(8).eq(existingTotal.quantity.round(8)) &&
+      roundedMoney(importedTotal.settlement, currency) === roundedMoney(existingTotal.settlement, currency) &&
+      roundedMoney(importedTotal.cost, currency) === roundedMoney(existingTotal.cost, currency)
+    ) {
+      const representativeId = existingItems[0].id;
+      indexes.forEach((index) => {
+        const activity = matched[index];
+        matched[index] = {
+          ...activity,
+          duplicateOfId: representativeId,
+          warnings: { ...(activity.warnings ?? {}), _duplicate: ['Duplicate activity covered by an existing merged same-day trade'] },
+        };
+      });
+      existingItems.forEach((item) => consumed.add(item.id));
+    }
+  }
+  return matched;
 }

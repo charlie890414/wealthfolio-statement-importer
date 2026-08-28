@@ -41,16 +41,6 @@ const isoDate = (value: string, formats: string[] = ['YYYY-MM-DD']) => {
   throw new Error(`無法解析日期：${value}`);
 };
 const issue = (issues: ConversionIssue[], lineNumber: number, message: string, severity: ConversionIssue['severity'] = 'error') => issues.push({ lineNumber, message, severity });
-const dedupe = (rows: NormalizedActivity[]) => {
-  const seen = new Set<string>();
-  return rows.filter((row) => {
-    const key = JSON.stringify(row);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-};
-
 export function detectBroker(headers: string[]): BrokerDetection {
   const has = (required: string[]) => required.filter((header) => !headers.includes(header));
   const candidates: Array<[BrokerKind, string[]]> = [['fubon', FUBON_HEADERS], ['sinopac', SINOPAC_HEADERS], ['schwab', SCHWAB_HEADERS], ['fundrich', FUNDRICH_HEADERS]];
@@ -101,33 +91,123 @@ function sinopac(rows: Array<Record<string, string>>, issues: ConversionIssue[])
   return output;
 }
 
-const schwabOption = (action: string) => ({ 'Sell to Open': ['SELL', 'POSITION_OPEN'], 'Buy to Close': ['BUY', 'POSITION_CLOSE'], Expired: ['ADJUSTMENT', 'OPTION_EXPIRY'] } as Record<string, string[]>)[action];
+const schwabOption = (action: string) => ({ 'Sell to Open': ['SELL', 'OPTION_OPEN'], 'Buy to Close': ['BUY', 'OPTION_CLOSE'], Expired: ['ADJUSTMENT', 'OPTION_EXPIRE'] } as Record<string, string[]>)[action];
 const occ = (symbol: string) => { const m = symbol.match(/^(.+?)\s+(\d{2})\/(\d{2})\/(\d{4})\s+([\d.]+)\s+([CP])$/); if (!m) return symbol; return `${m[1].trim().toUpperCase().slice(0, 6)}${m[4].slice(-2)}${m[2]}${m[3]}${m[6]}${decimal(m[5]).times(1000).round().toString().padStart(8, '0')}`; };
 const isBond = (symbol: string) => /^[A-Z0-9]{9}$/.test(symbol) && /\d/.test(symbol);
+const schwabTradePrice = (row: Record<string, string>, side: 'BUY' | 'SELL', multiplier = 1) => {
+  const quantity = decimal(row.Quantity).abs();
+  const settlement = decimal(row.Amount).abs();
+  const fee = decimal(row['Fees & Comm']).abs();
+  if (quantity.eq(0) || settlement.eq(0)) return money(row.Price);
+  const gross = side === 'BUY' ? settlement.minus(fee) : settlement.plus(fee);
+  if (gross.lte(0)) return money(row.Price);
+  return gross.div(quantity.times(multiplier)).toString();
+};
+const schwabReinvestPrice = (row: Record<string, string>) => {
+  // Reinvest Shares has two different values in Schwab's export: Price is the
+  // per-share execution price, while Amount is the rounded cash settlement.
+  // Keep Price for the lot basis and retain Amount for the cash movement.
+  return money(row.Price);
+};
+const schwabDividendSymbol = (symbol: string, description: string) => {
+  if (symbol) return symbol;
+  // Older Schwab/TDA rows put the ticker only in descriptions such as
+  // "TDA TRAN - ORDINARY DIVIDEND (VOO)".
+  return description.match(/\(([A-Z0-9.:-]+)\)\s*$/i)?.[1]?.toUpperCase() || '';
+};
+
+function mergeSchwabSameAmountTrades(rows: NormalizedActivity[]): NormalizedActivity[] {
+  const merged: NormalizedActivity[] = [];
+  const indexes = new Map<string, number>();
+
+  for (const row of rows) {
+    if (!['BUY', 'SELL'].includes(row.activityType) || !row.amount) {
+      merged.push(row);
+      continue;
+    }
+    const key = [row.date, row.symbol, row.activityType, row.subtype, row.amount].join('|');
+    const existingIndex = indexes.get(key);
+    if (existingIndex === undefined) {
+      indexes.set(key, merged.length);
+      merged.push({ ...row });
+      continue;
+    }
+    const base = merged[existingIndex];
+    const quantity = decimal(base.quantity).plus(decimal(row.quantity));
+    const notional = decimal(base.quantity).times(decimal(base.unitPrice))
+      .plus(decimal(row.quantity).times(decimal(row.unitPrice)));
+    base.quantity = quantity.toString();
+    base.unitPrice = quantity.eq(0) ? base.unitPrice : notional.div(quantity).toString();
+    base.fee = decimal(base.fee).plus(decimal(row.fee)).toString();
+    base.amount = decimal(base.amount).plus(decimal(row.amount)).toString();
+    const mergedCount = Number(base.comment.match(/merged (\d+) same-day same-amount fills/)?.[1] || 1) + 1;
+    base.comment = `${base.comment.replace(/ \| merged \d+ same-day same-amount fills$/, '')} | merged ${mergedCount} same-day same-amount fills`.trim();
+  }
+
+  return merged;
+}
+
 function schwab(rows: Array<Record<string, string>>, issues: ConversionIssue[]): NormalizedActivity[] {
-  const output: NormalizedActivity[] = []; const cash = '$CASH-USD';
+  const output: NormalizedActivity[] = [];
+  const bondCosts = new Map<string, Big>();
+  for (const row of rows) {
+    if (row.Action?.trim() !== 'Buy' || !isBond(row.Symbol?.trim() || '')) continue;
+    const symbol = row.Symbol.trim();
+    const quantity = decimal(row.Quantity).abs();
+    const reportedAmount = decimal(row.Amount).abs();
+    const cost = reportedAmount.gt(0) ? reportedAmount : quantity.times(decimal(row.Price));
+    if (cost.gt(0)) bondCosts.set(symbol, (bondCosts.get(symbol) || new Big(0)).plus(cost));
+  }
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i]; const line = i + 2; const action = row.Action?.trim();
     try {
-      if (action === 'Journal' || action === 'Full Redemption Adj') continue;
-      const date = isoDate(row.Date, ['MM/DD/YYYY']); const rawSymbol = row.Symbol?.trim(); const symbol = occ(rawSymbol); const desc = row.Description?.trim() || '';
-      const base: NormalizedActivity = { ...empty(), date, symbol, quantity: number(row.Quantity), unitPrice: money(row.Price), fee: money(row['Fees & Comm']), amount: money(row.Amount), currency: 'USD', comment: desc };
+      if (action === 'Journal') continue;
+      const date = isoDate(row.Date, ['MM/DD/YYYY']); const rawSymbol = row.Symbol?.trim(); const symbol = occ(rawSymbol); const desc = row.Description?.trim() || ''; const descUpper = desc.toUpperCase();
+      const base: NormalizedActivity = { ...empty(), date, symbol, quantity: absoluteMoney(row.Quantity), unitPrice: money(row.Price), fee: absoluteMoney(row['Fees & Comm']), amount: absoluteMoney(row.Amount), currency: 'USD', comment: desc };
+      if (action === 'Full Redemption Adj' && isBond(rawSymbol || '')) {
+        const principal = decimal(row.Amount).abs();
+        const cost = bondCosts.get(rawSymbol || '');
+        if (!cost || principal.lte(cost)) continue;
+        output.push({
+          ...base,
+          activityType: 'DEPOSIT',
+          symbol: '',
+          quantity: '1',
+          unitPrice: '1',
+          amount: principal.minus(cost).toString(),
+          fee: '',
+          instrumentType: '',
+          comment: `${desc} | BOND matured -> gain (new funds)`,
+        });
+        continue;
+      }
+      // The account baseline records fixed-income activity as cash only. The
+      // principal purchase/redemption legs are therefore intentionally omitted
+      // from the normalized activity stream; only the computed maturity gain
+      // above remains.
+      if (isBond(rawSymbol || '')) continue;
       const option = schwabOption(action);
-      if (option) { base.activityType = option[0]; base.subtype = option[1]; base.instrumentType = 'OPTION'; base.amount = absoluteMoney(row.Amount); if (!base.quantity) base.quantity = '1'; output.push(base); continue; }
-      if (action === 'Assigned') { base.activityType = 'ADJUSTMENT'; base.subtype = 'POSITION_CLOSE'; base.instrumentType = 'OPTION'; base.unitPrice = ''; base.amount = ''; output.push(base); continue; }
+      if (option) { base.activityType = option[0]; base.subtype = option[1]; base.instrumentType = 'OPTION'; if (!base.quantity) base.quantity = '1'; if (option[0] === 'BUY' || option[0] === 'SELL') base.unitPrice = schwabTradePrice(row, option[0] as 'BUY' | 'SELL', 100); output.push(base); continue; }
+      if (action === 'Assigned') { base.activityType = 'ADJUSTMENT'; base.subtype = 'OPTION_ASSIGNMENT'; base.instrumentType = 'OPTION'; base.unitPrice = ''; base.amount = ''; output.push(base); continue; }
       if (action === 'Stock Split') { base.activityType = 'SPLIT'; base.unitPrice = base.unitPrice || '1'; base.amount = ''; output.push(base); continue; }
       if (action === 'Full Redemption') { base.activityType = 'SELL'; base.instrumentType = isBond(rawSymbol) ? 'BOND' : ''; base.quantity = base.quantity.replace('-', ''); base.unitPrice = '1'; base.amount = base.quantity; output.push(base); continue; }
-      if (action === 'Buy' || action === 'Reinvest Shares' || action === 'Sell') { base.activityType = action === 'Sell' ? 'SELL' : 'BUY'; base.amount = absoluteMoney(row.Amount); if (isBond(symbol)) { base.instrumentType = 'BOND'; const q = asFloat(base.quantity); const amt = Math.abs(asFloat(row.Amount)); base.unitPrice = q && amt ? String((amt + Math.abs(asFloat(base.fee))) / q) : base.unitPrice; } output.push(base); continue; }
-      if (['Cash Dividend', 'Qualified Dividend', 'Reinvest Dividend', 'Qual Div Reinvest'].includes(action)) { base.activityType = 'DIVIDEND'; base.symbol = rawSymbol || cash; base.quantity = '1'; base.unitPrice = '1'; base.instrumentType = ''; output.push(base); continue; }
+      if (action === 'Buy' || action === 'Reinvest Shares' || action === 'Sell') { base.activityType = action === 'Sell' ? 'SELL' : 'BUY'; base.unitPrice = action === 'Reinvest Shares' ? schwabReinvestPrice(row) : schwabTradePrice(row, base.activityType as 'BUY' | 'SELL'); if (isBond(symbol)) base.instrumentType = 'BOND'; output.push(base); continue; }
+      if (['Cash Dividend', 'Qualified Dividend', 'Reinvest Dividend', 'Qual Div Reinvest'].includes(action)) { base.activityType = 'DIVIDEND'; base.symbol = schwabDividendSymbol(rawSymbol, desc); base.quantity = '1'; base.unitPrice = '1'; base.instrumentType = ''; output.push(base); continue; }
       if (['Bond Interest', 'Credit Interest'].includes(action)) { base.activityType = 'INTEREST'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue; }
-      if (action === 'NRA Tax Adj' || (action === 'Journaled Shares' && desc.includes('W-8 WITHHOLDING'))) { base.activityType = 'TAX'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue; }
-      if (action === 'MoneyLink Transfer' || action === 'Wire Received') { base.activityType = action === 'Wire Received' || asFloat(base.amount) >= 0 ? 'DEPOSIT' : 'WITHDRAWAL'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue; }
-      if (action === 'Internal Transfer') { base.activityType = asFloat(base.amount) >= 0 ? 'TRANSFER_IN' : 'TRANSFER_OUT'; base.symbol = rawSymbol || ''; base.instrumentType = ''; output.push(base); continue; }
-      if (action === 'Journaled Shares') { if (asFloat(base.amount) !== 0) { base.activityType = 'TAX'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); } continue; }
+      if (action === 'NRA Tax Adj' || (action === 'Journaled Shares' && descUpper.includes('W-8 WITHHOLDING'))) { base.activityType = 'TAX'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue; }
+      if (action === 'MoneyLink Transfer' || action === 'Wire Received') { base.activityType = action === 'Wire Received' || asFloat(row.Amount) >= 0 ? 'DEPOSIT' : 'WITHDRAWAL'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue; }
+      if (action === 'Internal Transfer') { base.activityType = asFloat(row.Amount) >= 0 ? 'DEPOSIT' : 'WITHDRAWAL'; base.symbol = rawSymbol || ''; base.instrumentType = ''; output.push(base); continue; }
+      if (action === 'Journaled Shares') {
+        if (!asFloat(base.amount)) continue;
+        if (descUpper.includes('CASH MOVEMENT OF OUTGOING ACCOUNT TRANSFER')) base.activityType = 'WITHDRAWAL';
+        else if (descUpper.includes('EF RETURN FEE')) base.activityType = 'FEE';
+        else throw new Error(`未支援的 Schwab Journaled Shares 現金交易：${desc || row.Amount}`);
+        base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue;
+      }
       throw new Error(`未支援的 Schwab Action：${action}`);
     } catch (error) { issue(issues, line, error instanceof Error ? error.message : String(error)); }
   }
-  return output;
+  return mergeSchwabSameAmountTrades(output);
 }
 
 function fundrich(rows: Array<Record<string, string>>, issues: ConversionIssue[]): NormalizedActivity[] {
@@ -159,5 +239,5 @@ function fundrich(rows: Array<Record<string, string>>, issues: ConversionIssue[]
 export function convert(broker: BrokerKind, rows: Array<Record<string, string>>): ConversionResult {
   const issues: ConversionIssue[] = []; let activities: NormalizedActivity[];
   if (broker === 'fubon') activities = fubon(rows, issues); else if (broker === 'sinopac') activities = sinopac(rows, issues); else if (broker === 'schwab') activities = schwab(rows, issues); else activities = fundrich(rows, issues);
-  return { broker, sourceRows: rows.length, activities: dedupe(validateNormalizedActivities(activities, issues)), issues };
+  return { broker, sourceRows: rows.length, activities: validateNormalizedActivities(activities, issues), issues };
 }

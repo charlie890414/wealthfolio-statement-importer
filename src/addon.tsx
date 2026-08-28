@@ -5,7 +5,7 @@ import type { ChangeEvent, DragEvent } from 'react';
 import { useEffect, useState } from 'react';
 import { convert, detectBroker } from './lib/converters';
 import { parseCsv, rowsAsObjects, stringifyActivities } from './lib/csv';
-import { activityFromSource, allImportRowNumbers, checkImportInBatches, selectImportRows, type CheckedActivity } from './lib/import';
+import { activityFromSource, allImportRowNumbers, checkImportInBatches, requireResolvedOption, selectImportRows, type CheckedActivity } from './lib/import';
 import { markExistingDuplicates, sameDayNonDuplicateReason, type ExistingActivityForDedupe } from './lib/dedupe';
 import type { ConversionIssue, NormalizedActivity } from './lib/types';
 
@@ -72,11 +72,14 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
     // The host may omit addon-only metadata such as lineNumber from its
     // response. Restore the submitted row identity by position before
     // merging validation/deduplication results back into the preview.
-    const checkedWithLines = checked.map((activity, index) => ({
-      ...activity,
-      date: rawActivities[index]?.date ?? activity.date,
-      lineNumber: rawActivities[index]?.lineNumber ?? activity.lineNumber,
-    }));
+    const checkedWithLines = checked.map((activity, index) => {
+      const submitted = rawActivities[index];
+      return {
+        ...requireResolvedOption(activity, submitted),
+        date: submitted?.date ?? activity.date,
+        lineNumber: submitted?.lineNumber ?? activity.lineNumber,
+      };
+    });
     // Wealthfolio may return a resolved/canonical symbol (for example VWRA.L as
     // VWRA). Keep the symbol the importer submitted for display and export while
     // retaining the backend-resolved assetId and validation fields.

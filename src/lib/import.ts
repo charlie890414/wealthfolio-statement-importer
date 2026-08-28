@@ -87,6 +87,19 @@ export function activityFromSource(
   };
 }
 
+/** Prevents an unresolved option from being imported as an ordinary asset. */
+export function requireResolvedOption(activity: ActivityImport, submitted?: ActivityImport): ActivityImport {
+  if (submitted?.instrumentType !== 'OPTION' || activity.assetId) return activity;
+  return {
+    ...activity,
+    isValid: false,
+    errors: {
+      ...(activity.errors ?? {}),
+      _optionAsset: ['選擇權標的無法解析；請先映射正確的 OCC 代號，否則不會套用 100 倍合約乘數。'],
+    },
+  };
+}
+
 export function selectImportRows<T extends ImportRowWithLine>(rows: readonly T[], selected: ReadonlySet<number>): T[] {
   return rows.filter((row, index) => selected.has(row.lineNumber ?? index + 1));
 }

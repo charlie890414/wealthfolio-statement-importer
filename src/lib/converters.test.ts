@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ActivityImport } from '@wealthfolio/addon-sdk';
 import { convert, detectBroker } from './converters';
 import { parseCsv, stringifyActivities } from './csv';
-import { activityFromSource, allImportRowNumbers, checkImportInBatches, selectImportRows } from './import';
+import { activityFromSource, allImportRowNumbers, checkImportInBatches, requireResolvedOption, selectImportRows } from './import';
 import { markExistingDuplicates, sameDayNonDuplicateReason } from './dedupe';
 
 const activity = (lineNumber: number) => ({
@@ -92,6 +92,16 @@ describe('activity import validation batching', () => {
     const activities = [activity(1)];
     await expect(checkImportInBatches(activities, async () => [{ ...activities[0], isValid: 'yes' } as unknown as ActivityImport])).rejects.toThrow('回傳資料格式不符');
   });
+
+  it('blocks an option whose asset was not resolved by the host', () => {
+    const submitted = { ...activity(1), instrumentType: 'OPTION' } as ActivityImport;
+    const unresolved = requireResolvedOption({ ...submitted }, submitted);
+    const resolved = requireResolvedOption({ ...submitted, assetId: 'option-asset' }, submitted);
+
+    expect(unresolved.isValid).toBe(false);
+    expect(unresolved.errors?._optionAsset?.[0]).toContain('100 倍');
+    expect(resolved.isValid).toBe(true);
+  });
 });
 
 describe('CSV parsing', () => {
@@ -143,8 +153,58 @@ describe('broker converters', () => {
     ]);
     expect(result.issues).toHaveLength(0);
     expect(result.activities[0].symbol).toBe('UUUU261120P00012000');
-    expect(result.activities[0].subtype).toBe('POSITION_OPEN');
+    expect(result.activities[0].subtype).toBe('OPTION_OPEN');
     expect(result.activities[1].activityType).toBe('DIVIDEND');
+  });
+
+  it('merges same-day Schwab trades with the same amount', () => {
+    const result = convert('schwab', [
+      { Date: '08/21/2026', Action: 'Buy', Symbol: 'AAPL', Description: 'fill 1', Quantity: '1', Price: '$100', 'Fees & Comm': '$1', Amount: '-$101' },
+      { Date: '08/21/2026', Action: 'Buy', Symbol: 'AAPL', Description: 'fill 2', Quantity: '1', Price: '$100', 'Fees & Comm': '$1', Amount: '-$101' },
+      { Date: '08/21/2026', Action: 'Buy', Symbol: 'AAPL', Description: 'different amount', Quantity: '2', Price: '$50', 'Fees & Comm': '$0', Amount: '-$100' },
+    ]);
+    expect(result.activities).toHaveLength(2);
+    expect(result.activities[0]).toMatchObject({ quantity: '2', unitPrice: '100', fee: '2', amount: '202' });
+  });
+
+  it('normalizes Schwab cash directions and preserves reinvestment execution prices', () => {
+    const result = convert('schwab', [
+      { Date: '03/29/2022', Action: 'Reinvest Shares', Symbol: 'VOO', Description: 'Bought fractional shares', Quantity: '0.002', Price: '$421.7638', 'Fees & Comm': '', Amount: '-$0.96' },
+      { Date: '03/29/2022', Action: 'NRA Tax Adj', Symbol: 'VOO', Description: 'Tax', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '-$0.41' },
+      { Date: '12/22/2021', Action: 'Journaled Shares', Symbol: '', Description: 'TDA TRAN - EF RETURN FEE', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '-$25.00' },
+      { Date: '05/13/2024', Action: 'Journaled Shares', Symbol: '', Description: 'TDA TRAN - CASH MOVEMENT OF OUTGOING ACCOUNT TRANSFER', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '-$13295.79' },
+      { Date: '10/08/2025', Action: 'MoneyLink Transfer', Symbol: '', Description: 'Outgoing transfer', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '-$9.00' },
+    ]);
+
+    expect(result.issues).toHaveLength(0);
+    expect(result.activities.map(({ activityType, amount }) => ({ activityType, amount }))).toEqual([
+      { activityType: 'BUY', amount: '0.96' },
+      { activityType: 'TAX', amount: '0.41' },
+      { activityType: 'FEE', amount: '25' },
+      { activityType: 'WITHDRAWAL', amount: '13295.79' },
+      { activityType: 'WITHDRAWAL', amount: '9' },
+    ]);
+    expect(result.activities[0].unitPrice).toBe('421.7638');
+  });
+
+  it('recovers a ticker from an older Schwab dividend description', () => {
+    const result = convert('schwab', [{
+      Date: '03/27/2024', Action: 'Cash Dividend', Symbol: '',
+      Description: 'TDA TRAN - ORDINARY DIVIDEND (VOO)', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '$1.58',
+    }]);
+    expect(result.issues).toHaveLength(0);
+    expect(result.activities[0]).toMatchObject({ activityType: 'DIVIDEND', symbol: 'VOO', amount: '1.58' });
+  });
+
+  it('matches the DB baseline for T-bills by keeping only maturity gains', () => {
+    const result = convert('schwab', [
+      { Date: '06/20/2024', Action: 'Buy', Symbol: '912797KF3', Description: 'US TREASURY BILL', Quantity: '12000', Price: '$99.5901', 'Fees & Comm': '', Amount: '-$11950.81' },
+      { Date: '06/18/2024', Action: 'Full Redemption Adj', Symbol: '912797KF3', Description: 'US TREASURY BILXXX**MATURED**', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '$12000.00' },
+      { Date: '06/18/2024', Action: 'Full Redemption', Symbol: '912797KF3', Description: 'US TREASURY BILXXX**MATURED**', Quantity: '-12,000', Price: '', 'Fees & Comm': '', Amount: '' },
+    ]);
+    expect(result.issues).toHaveLength(0);
+    expect(result.activities).toHaveLength(1);
+    expect(result.activities[0]).toMatchObject({ activityType: 'DEPOSIT', amount: '49.19', symbol: '', comment: 'US TREASURY BILXXX**MATURED** | BOND matured -> gain (new funds)' });
   });
 
   it('converts Fundrich buy with paired cash activity and skips failures', () => {
@@ -238,6 +298,55 @@ describe('economic duplicate matching', () => {
   it('pairs only as many duplicates as already exist', () => {
     const result = markExistingDuplicates([imported('a', 'one'), imported('b', 'two')], [{ id: 'old', accountId: 'account', activityType: 'BUY', date: '2026-07-29', assetId: 'asset-0050', quantity: 1000, unitPrice: 94.5, fee: 30, currency: 'TWD' }], 'account');
     expect(result.map((item) => item.duplicateOfId)).toEqual(['old', undefined]);
+  });
+
+  it('matches split CSV fills to an existing merged same-day trade', () => {
+    const first = imported('first', 'CSV');
+    first.quantity = '1'; first.unitPrice = '246'; first.fee = '0'; first.amount = '246';
+    const second = imported('second', 'CSV');
+    second.quantity = '4'; second.unitPrice = '258'; second.fee = '0'; second.amount = '1032';
+    const result = markExistingDuplicates([first, second], [{
+      id: 'merged', accountId: 'account', activityType: 'BUY', date: '2026-07-29', assetSymbol: '0050',
+      quantity: 5, unitPrice: 255.6, fee: 0, amount: 1278, currency: 'TWD',
+    }], 'account');
+
+    expect(result.map((item) => item.duplicateOfId)).toEqual(['merged', 'merged']);
+  });
+
+  it('matches a cash dividend when the DB row has an asset but the import does not', () => {
+    const row = imported('new', 'TDA TRAN - ORDINARY DIVIDEND (VOO)');
+    row.activityType = 'DIVIDEND';
+    row.currency = 'USD';
+    row.symbol = '';
+    row.assetId = undefined;
+    row.quantity = '1';
+    row.unitPrice = '1';
+    row.fee = undefined;
+    row.amount = '1.58';
+    const result = markExistingDuplicates([row], [{
+      id: 'old', accountId: 'account', activityType: 'DIVIDEND', date: '2026-07-29',
+      assetId: 'voo-asset', assetSymbol: 'VOO', quantity: 1, unitPrice: 1, amount: 1.58, currency: 'USD',
+    }], 'account');
+    expect(result[0].duplicateOfId).toBe('old');
+  });
+
+  it('matches an unresolved option by its normalized description', () => {
+    const row = imported('new', 'PUT ENERGY FUELS INC $12 EXP 11/20/26');
+    row.activityType = 'SELL';
+    row.currency = 'USD';
+    row.subtype = 'OPTION_OPEN';
+    row.symbol = 'UUUU261120P00012000';
+    row.assetId = undefined;
+    row.quantity = '1';
+    row.unitPrice = '0.92';
+    row.fee = '0.66';
+    row.amount = '91.34';
+    const result = markExistingDuplicates([row], [{
+      id: 'old', accountId: 'account', activityType: 'SELL', subtype: 'POSITION_OPEN', date: '2026-07-29',
+      assetId: undefined, assetSymbol: undefined, quantity: 1, unitPrice: 0.92, fee: 0.66, amount: 91.34,
+      currency: 'USD', notes: 'PUT ENERGY FUELS INC $12 EXP 11/20/26',
+    }], 'account');
+    expect(result[0].duplicateOfId).toBe('old');
   });
 
   it('does not match a different economic amount', () => {
