@@ -1,0 +1,44 @@
+{
+  "id": "statement-csv-importer",
+  "name": "CSV 對帳單匯入",
+  "version": "1.0.1",
+  "description": "將富邦、永豐、Schwab 與基富通 CSV 對帳單轉換並匯入 Wealthfolio",
+  "author": "charlie890414",
+  "main": "dist/addon.js",
+  "sdkVersion": "3.7.0",
+  "minWealthfolioVersion": "3.7.0",
+  "enabled": true,
+  "contributes": {
+    "routes": [{ "id": "statement-csv-importer" }],
+    "links": {
+      "sidebar": [
+        {
+          "id": "statement-csv-importer",
+          "route": "statement-csv-importer",
+          "label": "CSV 對帳單匯入",
+          "icon": "chart-line",
+          "order": 100
+        }
+      ]
+    }
+  },
+  "hostDependencies": {
+    "@tanstack/react-query": "^5.90.0",
+    "@wealthfolio/addon-sdk": "^3.7.0",
+    "@wealthfolio/ui": "^3.7.0",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.561.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "recharts": "^3.7.0"
+  },
+  "permissions": [
+    { "category": "accounts", "functions": ["getAll"], "purpose": "選擇匯入目的帳戶" },
+    { "category": "activities", "functions": ["checkImport", "import", "getAll", "getImportMapping", "saveImportMapping"], "purpose": "驗證、去重、映射與匯入交易活動" },
+    { "category": "settings", "functions": ["get"], "purpose": "使用 Wealthfolio 顯示時區進行交易日期去重" },
+    { "category": "market-data", "functions": ["searchTicker"], "purpose": "搜尋並重新映射標的" },
+    { "category": "files", "functions": ["openSaveDialog"], "purpose": "下載轉換後的 Wealthfolio CSV" }
+  ],
+  "keywords": ["wealthfolio", "addon"],
+  "license": "MIT"
+}
