@@ -1,4 +1,4 @@
-# Wealthfolio CSV 對帳單匯入
+# Wealthfolio 對帳單匯入
 
 將富邦證券複委託、永豐證券、Charles Schwab 與基富通的 CSV 對帳單轉換為 Wealthfolio 活動，先預覽並驗證，再直接匯入或下載標準 CSV。
 
