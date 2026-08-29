@@ -36,6 +36,8 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   const [dedupeWarning, setDedupeWarning] = useState('');
   const [showDedupeExplanation, setShowDedupeExplanation] = useState(false);
   const [sameDayReasons, setSameDayReasons] = useState<Map<number, string>>(new Map());
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
 
   useEffect(() => {
     void ctx.api.accounts.getAll().then((items) => {
@@ -47,10 +49,12 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
 
   const selectedAccount = accounts.find((item) => item.id === accountId);
   const hasConversionErrors = issues.some((item) => item.severity === 'error');
-  const selectedCount = selectedRows.size;
-  const hasValidationErrors = validated && activities.some((activity) => selectedRows.has(activity.lineNumber ?? -1) && errorMessages(activity).length > 0);
-  const importable = activities.filter((activity) => selectedRows.has(activity.lineNumber ?? -1) && activity.isValid !== false && !errorMessages(activity).length && !isDuplicate(activity));
-  const canCommit = Boolean(accountId && validated && importable.length > 0 && activities.length && !hasConversionErrors && !hasValidationErrors && !busy);
+  const dateRangeInvalid = Boolean(dateFrom && dateTo && dateFrom > dateTo);
+  const visibleActivities = dateRangeInvalid ? [] : activities.filter((activity) => dateInRange(activity.source.date, dateFrom, dateTo));
+  const selectedCount = visibleActivities.filter((activity) => selectedRows.has(activity.lineNumber ?? -1)).length;
+  const hasValidationErrors = validated && visibleActivities.some((activity) => selectedRows.has(activity.lineNumber ?? -1) && errorMessages(activity).length > 0);
+  const importable = visibleActivities.filter((activity) => selectedRows.has(activity.lineNumber ?? -1) && activity.isValid !== false && !errorMessages(activity).length && !isDuplicate(activity));
+  const canCommit = Boolean(accountId && validated && importable.length > 0 && visibleActivities.length && !dateRangeInvalid && !hasConversionErrors && !hasValidationErrors && !busy);
 
   function invalidateValidation() {
     setValidated(false);
@@ -66,7 +70,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
     } catch {
       timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     }
-    const selected = selectImportRows(activities, selectedRows);
+    const selected = selectImportRows(visibleActivities, selectedRows);
     const rawActivities = (rows.length ? rows : selected.map((item) => item.source)).map((row, index) => activityFromSource(row, selected[index]?.lineNumber ?? index + 1, id, timezone));
     const checked = await checkImportInBatches(rawActivities, (batch) => ctx.api.activities.checkImport(batch), (completed, total) => setMessage(`驗證中：已完成 ${completed} / ${total} 筆活動…`));
     // The host may omit addon-only metadata such as lineNumber from its
@@ -120,7 +124,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   }
 
   async function readFile(file: File) {
-    setBusy(true); setMessage(''); setImportResult(''); setActivities([]); setIssues([]); setSelectedRows(new Set()); invalidateValidation();
+    setBusy(true); setMessage(''); setImportResult(''); setActivities([]); setIssues([]); setSelectedRows(new Set()); setDateFrom(''); setDateTo(''); invalidateValidation();
     try {
       const buffer = await file.arrayBuffer();
       const text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
@@ -181,7 +185,14 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
     } catch (error) { setMessage(`恢復標的失敗：${String(error)}`); } finally { setBusy(false); }
   }
   function toggleRow(lineNumber: number, checked: boolean) { setSelectedRows((current) => { const next = new Set(current); if (checked) next.add(lineNumber); else next.delete(lineNumber); return next; }); }
-  function toggleAll(checked: boolean) { setSelectedRows(checked ? allImportRowNumbers(activities) : new Set()); }
+  function toggleAll(checked: boolean) {
+    const visibleLines = allImportRowNumbers(visibleActivities);
+    setSelectedRows((current) => {
+      const next = new Set(current);
+      visibleLines.forEach((lineNumber) => checked ? next.add(lineNumber) : next.delete(lineNumber));
+      return next;
+    });
+  }
   function onFileChange(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (file) void readFile(file); }
   function onDrop(event: DragEvent<HTMLLabelElement>) { event.preventDefault(); const file = event.dataTransfer.files?.[0]; if (file) void readFile(file); }
   async function download() {
@@ -199,7 +210,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   return <div className="p-6 max-w-7xl mx-auto space-y-5">
     <div><h1 className="text-3xl font-bold">對帳單匯入</h1><p className="text-muted-foreground mt-1">支援富邦複委託、永豐、Schwab 與基富通。</p></div>
     <section className="border rounded-lg p-5 space-y-4">
-      <label className="block font-medium">1. 選擇 Wealthfolio 帳戶<select className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background" value={accountId} onChange={(event) => { setAccountId(event.target.value); setActivities([]); setSelectedRows(new Set()); setFileName(''); setBroker(''); setIssues([]); setImportResult(''); invalidateValidation(); }} disabled={busy}>
+      <label className="block font-medium">1. 選擇 Wealthfolio 帳戶<select className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background" value={accountId} onChange={(event) => { setAccountId(event.target.value); setActivities([]); setSelectedRows(new Set()); setFileName(''); setBroker(''); setIssues([]); setImportResult(''); setDateFrom(''); setDateTo(''); invalidateValidation(); }} disabled={busy}>
         <option value="">請選擇帳戶</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}（{account.currency}）</option>)}
       </select></label>
       <label className="block font-medium" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>2. 上傳 CSV
@@ -208,11 +219,12 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
       {busy && <p className="text-sm">處理中…</p>}{message && <p className="rounded bg-muted p-3 text-sm">{message}</p>}{importResult && <p className="rounded bg-green-50 p-3 text-sm text-green-800">{importResult}</p>}
     </section>
     {activities.length > 0 && <section className="border rounded-lg p-5 space-y-4">
-      <div className="flex flex-wrap items-center gap-4 text-sm"><span>來源：{broker}</span><span>活動：{activities.length}</span><span>已選取：{selectedCount}</span><Badge variant={validated ? (hasValidationErrors ? 'destructive' : 'default') : 'secondary'}>{validated ? (hasValidationErrors ? '有驗證錯誤' : '驗證完成') : '待驗證'}</Badge></div>
+      <div className="flex flex-wrap items-center gap-4 text-sm"><span>來源：{broker}</span><span>活動：{activities.length}</span><span>顯示：{visibleActivities.length}</span><span>已選取：{selectedCount}</span><Badge variant={validated ? (hasValidationErrors ? 'destructive' : 'default') : 'secondary'}>{validated ? (hasValidationErrors ? '有驗證錯誤' : '驗證完成') : '待驗證'}</Badge></div>
       {issues.length > 0 && <div className="rounded bg-yellow-50 p-3 text-sm"><p className="font-medium">轉換訊息</p>{issues.map((item, index) => <p key={`${item.lineNumber}-${index}`}>{item.lineNumber ? `第 ${item.lineNumber} 列：` : ''}{item.message}</p>)}</div>}
-      <div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2 text-sm"><Checkbox checked={selectedCount === activities.length} onCheckedChange={(checked) => toggleAll(checked === true)} disabled={busy} />全選／取消全選</label><label className="flex items-center gap-2 text-sm"><Checkbox checked={showDedupeExplanation} onCheckedChange={(checked) => setShowDedupeExplanation(checked === true)} disabled={busy} />顯示同日同標的未重複原因</label><span className="text-sm text-muted-foreground">先選取活動並完成標的映射，再執行驗證。</span><Button onClick={() => void validateSelected()} disabled={!selectedCount || busy}>{busy ? '處理中…' : `驗證選取的 ${selectedCount} 筆`}</Button></div>
+      <div className="flex flex-wrap items-end gap-3"><label className="text-sm">起日<Input className="mt-1 w-44" type="date" value={dateFrom} onChange={(event) => { setDateFrom(event.target.value); invalidateValidation(); }} disabled={busy} /></label><label className="text-sm">迄日<Input className="mt-1 w-44" type="date" value={dateTo} onChange={(event) => { setDateTo(event.target.value); invalidateValidation(); }} disabled={busy} /></label><Button variant="outline" onClick={() => { setDateFrom(''); setDateTo(''); invalidateValidation(); }} disabled={busy || (!dateFrom && !dateTo)}>清除日期</Button>{dateRangeInvalid && <span className="text-sm text-red-600">起日不可晚於迄日</span>}</div>
+      <div className="flex flex-wrap items-center gap-3"><label className="flex items-center gap-2 text-sm"><Checkbox checked={visibleActivities.length > 0 && selectedCount === visibleActivities.length} onCheckedChange={(checked) => toggleAll(checked === true)} disabled={busy || !visibleActivities.length} />全選／取消全選篩選結果</label><label className="flex items-center gap-2 text-sm"><Checkbox checked={showDedupeExplanation} onCheckedChange={(checked) => setShowDedupeExplanation(checked === true)} disabled={busy} />顯示同日同標的未重複原因</label><span className="text-sm text-muted-foreground">驗證與匯入只會處理目前日期範圍內的已選取活動。</span><Button onClick={() => void validateSelected()} disabled={!selectedCount || busy || dateRangeInvalid}>{busy ? '處理中…' : `驗證選取的 ${selectedCount} 筆`}</Button></div>
       {dedupeWarning && <p className="rounded bg-yellow-50 p-3 text-sm text-yellow-800">{dedupeWarning}</p>}
-      <div className="overflow-auto max-h-[32rem]"><table className="w-full text-sm"><thead><tr className="border-b text-left"><th className="p-2"><span className="sr-only">選取</span></th><th className="p-2">日期</th><th className="p-2">活動</th><th className="p-2">標的</th><th className="p-2">數量</th><th className="p-2">價格</th><th className="p-2">金額</th><th className="p-2">費用／稅費</th><th className="p-2 w-32">狀態</th></tr></thead><tbody>{activities.map((activity, index) => { const errors = errorMessages(activity); const warnings = warningMessages(activity); const sourceSymbol = activity.source.sourceSymbol || activity.source.symbol; const canMap = Boolean(sourceSymbol) && !['DEPOSIT', 'WITHDRAWAL', 'FEE', 'TAX', 'CREDIT', 'INTEREST'].includes(String(activity.activityType)); const lineNumber = activity.lineNumber ?? index + 1; const selected = selectedRows.has(lineNumber); const explanation = showDedupeExplanation ? sameDayReasons.get(lineNumber) : undefined; const status = !selected ? '未選取' : !validated ? '待驗證' : isDuplicate(activity) ? '重複，將跳過' : errors.length ? errors.join('；') : warnings.length ? warnings.join('；') : explanation || '可匯入'; const statusClass = !selected ? 'text-muted-foreground' : errors.length ? 'text-red-600' : warnings.length || explanation ? 'text-yellow-700' : ''; return <tr key={`${lineNumber}-${index}`} className="border-b align-top"><td className="p-2"><Checkbox checked={selected} onCheckedChange={(checked) => toggleRow(lineNumber, checked === true)} disabled={busy} /></td><td className="p-2">{activity.source.date}</td><td className="p-2">{activity.activityType}</td><td className="p-2">{canMap ? <div><Button variant="link" className="h-auto p-0" onClick={() => { setEditingSymbol(sourceSymbol); setSymbolQuery(activity.symbol || sourceSymbol); }} disabled={busy}>{activity.source.sourceSymbol !== activity.symbol ? `${sourceSymbol} → ` : ''}{activity.symbol || '—'}</Button>{editingSymbol === sourceSymbol && <div className="mt-1 min-w-64 space-y-1"><Input value={symbolQuery} onChange={(event) => void searchSymbols(event.target.value)} placeholder="搜尋標的或輸入完整代號" />{symbolResults.slice(0, 6).map((item) => <Button variant="ghost" className="block h-auto w-full justify-start p-1" key={`${item.symbol}-${item.exchangeMic}`} onClick={() => void selectSymbol(sourceSymbol, item)}>{item.providerSymbol || item.canonicalSymbol || item.symbol} {item.longName ? `— ${item.longName}` : ''}</Button>)}{symbolQuery.trim() && <Button variant="outline" className="h-auto w-full justify-start p-1" onClick={() => void useSymbol(sourceSymbol)}>使用此代號：{symbolQuery.trim()}</Button>}{activity.source.sourceSymbol !== activity.symbol && <Button variant="link" className="h-auto p-0 text-xs" onClick={() => void restoreSymbol(sourceSymbol)}>恢復原始代號</Button>}</div>}</div> : '—'}</td><td className="p-2">{activity.quantity || '—'}</td><td className="p-2">{activity.unitPrice || '—'}</td><td className="p-2">{activity.amount || '—'}</td><td className="p-2">{activity.fee || '—'}</td><td className="p-2 w-32 max-w-32"><div className={`truncate whitespace-nowrap ${statusClass}`} title={status}>{status}</div></td></tr>; })}</tbody></table></div>
+      <div className="overflow-auto max-h-[32rem]"><table className="w-full text-sm"><thead><tr className="border-b text-left"><th className="p-2"><span className="sr-only">選取</span></th><th className="p-2">日期</th><th className="p-2">活動</th><th className="p-2">標的</th><th className="p-2">數量</th><th className="p-2">價格</th><th className="p-2">金額</th><th className="p-2">費用／稅費</th><th className="p-2 w-32">狀態</th></tr></thead><tbody>{visibleActivities.map((activity, index) => { const errors = errorMessages(activity); const warnings = warningMessages(activity); const sourceSymbol = activity.source.sourceSymbol || activity.source.symbol; const canMap = Boolean(sourceSymbol) && !['DEPOSIT', 'WITHDRAWAL', 'FEE', 'TAX', 'CREDIT', 'INTEREST'].includes(String(activity.activityType)); const lineNumber = activity.lineNumber ?? index + 1; const selected = selectedRows.has(lineNumber); const explanation = showDedupeExplanation ? sameDayReasons.get(lineNumber) : undefined; const status = !selected ? '未選取' : !validated ? '待驗證' : isDuplicate(activity) ? '重複，將跳過' : errors.length ? errors.join('；') : warnings.length ? warnings.join('；') : explanation || '可匯入'; const statusClass = !selected ? 'text-muted-foreground' : errors.length ? 'text-red-600' : warnings.length || explanation ? 'text-yellow-700' : ''; return <tr key={`${lineNumber}-${index}`} className="border-b align-top"><td className="p-2"><Checkbox checked={selected} onCheckedChange={(checked) => toggleRow(lineNumber, checked === true)} disabled={busy} /></td><td className="p-2">{activity.source.date}</td><td className="p-2">{activity.activityType}</td><td className="p-2">{canMap ? <div><Button variant="link" className="h-auto p-0" onClick={() => { setEditingSymbol(sourceSymbol); setSymbolQuery(activity.symbol || sourceSymbol); }} disabled={busy}>{activity.source.sourceSymbol !== activity.symbol ? `${sourceSymbol} → ` : ''}{activity.symbol || '—'}</Button>{editingSymbol === sourceSymbol && <div className="mt-1 min-w-64 space-y-1"><Input value={symbolQuery} onChange={(event) => void searchSymbols(event.target.value)} placeholder="搜尋標的或輸入完整代號" />{symbolResults.slice(0, 6).map((item) => <Button variant="ghost" className="block h-auto w-full justify-start p-1" key={`${item.symbol}-${item.exchangeMic}`} onClick={() => void selectSymbol(sourceSymbol, item)}>{item.providerSymbol || item.canonicalSymbol || item.symbol} {item.longName ? `— ${item.longName}` : ''}</Button>)}{symbolQuery.trim() && <Button variant="outline" className="h-auto w-full justify-start p-1" onClick={() => void useSymbol(sourceSymbol)}>使用此代號：{symbolQuery.trim()}</Button>}{activity.source.sourceSymbol !== activity.symbol && <Button variant="link" className="h-auto p-0 text-xs" onClick={() => void restoreSymbol(sourceSymbol)}>恢復原始代號</Button>}</div>}</div> : '—'}</td><td className="p-2">{activity.quantity || '—'}</td><td className="p-2">{activity.unitPrice || '—'}</td><td className="p-2">{activity.amount || '—'}</td><td className="p-2">{activity.fee || '—'}</td><td className="p-2 w-32 max-w-32"><div className={`truncate whitespace-nowrap ${statusClass}`} title={status}>{status}</div></td></tr>; })}</tbody></table></div>
       <div className="flex gap-3"><Button variant="outline" onClick={() => void download()} disabled={!canCommit}>下載 Wealthfolio CSV</Button><Button onClick={() => void commit()} disabled={!canCommit}>確認匯入（{importable.length} 筆）</Button></div>
     </section>}
   </div>;
