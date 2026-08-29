@@ -16,7 +16,7 @@
           "id": "wealthfolio-statement-importer",
           "route": "wealthfolio-statement-importer",
           "label": "對帳單匯入",
-          "icon": "chart-line",
+          "icon": "invoice",
           "order": 100
         }
       ]
