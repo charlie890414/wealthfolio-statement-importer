@@ -5,7 +5,7 @@ import type { ChangeEvent, DragEvent } from 'react';
 import { useEffect, useState } from 'react';
 import { convert, detectBroker } from './lib/converters';
 import { parseCsv, rowsAsObjects, stringifyActivities } from './lib/csv';
-import { activityFromSource, allImportRowNumbers, checkImportInBatches, requireResolvedOption, selectImportRows, type CheckedActivity } from './lib/import';
+import { activityFromSource, allImportRowNumbers, checkImportInBatches, dateInRange, mergeCheckedActivity, selectImportRows, type CheckedActivity } from './lib/import';
 import { markExistingDuplicates, sameDayNonDuplicateReason, type ExistingActivityForDedupe } from './lib/dedupe';
 import type { ConversionIssue, NormalizedActivity } from './lib/types';
 
@@ -74,11 +74,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
     // merging validation/deduplication results back into the preview.
     const checkedWithLines = checked.map((activity, index) => {
       const submitted = rawActivities[index];
-      return {
-        ...requireResolvedOption(activity, submitted),
-        date: submitted?.date ?? activity.date,
-        lineNumber: submitted?.lineNumber ?? activity.lineNumber,
-      };
+      return submitted ? mergeCheckedActivity(activity, submitted) : activity;
     });
     // Wealthfolio may return a resolved/canonical symbol (for example VWRA.L as
     // VWRA). Keep the symbol the importer submitted for display and export while

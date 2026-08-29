@@ -15,6 +15,13 @@ export type CheckedActivity = ActivityImport & { source: NormalizedActivity };
 
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+/** Inclusive date-only filter with optional lower and upper bounds. */
+export function dateInRange(date: string, from = '', to = ''): boolean {
+  const value = date.trim().slice(0, 10);
+  if (!DATE_ONLY.test(value)) return false;
+  return (!from || value >= from) && (!to || value <= to);
+}
+
 /** Converts a broker calendar date to the instant representing midnight in an IANA timezone. */
 export function dateAtLocalMidnight(date: string, timezone: string): string {
   const match = date.match(DATE_ONLY);
@@ -97,6 +104,28 @@ export function requireResolvedOption(activity: ActivityImport, submitted?: Acti
       ...(activity.errors ?? {}),
       _optionAsset: ['選擇權標的無法解析；請先映射正確的 OCC 代號，否則不會套用 100 倍合約乘數。'],
     },
+  };
+}
+
+/**
+ * Merges host validation metadata without letting quote resolution rewrite the
+ * broker's transaction economics.
+ */
+export function mergeCheckedActivity(activity: ActivityImport, submitted: ActivityImport): ActivityImport {
+  return {
+    ...requireResolvedOption(activity, submitted),
+    date: submitted.date ?? activity.date,
+    lineNumber: submitted.lineNumber ?? activity.lineNumber,
+    activityType: submitted.activityType,
+    quantity: submitted.quantity,
+    unitPrice: submitted.unitPrice,
+    currency: submitted.currency,
+    fee: submitted.fee,
+    tax: submitted.tax,
+    amount: submitted.amount,
+    fxRate: submitted.fxRate,
+    subtype: submitted.subtype,
+    comment: submitted.comment,
   };
 }
 

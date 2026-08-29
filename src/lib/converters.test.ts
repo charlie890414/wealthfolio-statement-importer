@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ActivityImport } from '@wealthfolio/addon-sdk';
 import { convert, detectBroker } from './converters';
 import { parseCsv, stringifyActivities } from './csv';
-import { activityFromSource, allImportRowNumbers, checkImportInBatches, requireResolvedOption, selectImportRows } from './import';
+import { activityFromSource, allImportRowNumbers, checkImportInBatches, dateInRange, mergeCheckedActivity, requireResolvedOption, selectImportRows } from './import';
 import { markExistingDuplicates, sameDayNonDuplicateReason } from './dedupe';
 
 const activity = (lineNumber: number) => ({
@@ -16,6 +16,39 @@ const activity = (lineNumber: number) => ({
 });
 
 describe('activity import validation batching', () => {
+  it('filters broker dates inclusively with optional bounds', () => {
+    expect(dateInRange('2026-08-17', '2026-08-17', '2026-08-18')).toBe(true);
+    expect(dateInRange('2026-08-18', '2026-08-17', '2026-08-18')).toBe(true);
+    expect(dateInRange('2026-08-16', '2026-08-17', '')).toBe(false);
+    expect(dateInRange('2026-08-19', '', '2026-08-18')).toBe(false);
+    expect(dateInRange('not-a-date', '', '')).toBe(false);
+  });
+
+  it('keeps broker economics when host validation resolves the asset with a market quote', () => {
+    const rows = convert('sinopac', [
+      { 成交日: '2026/08/18', 商品: '009826 貝萊德世界股票', 買賣: '現買', 數量: '4000', 成交價: '10.2', 價金: '40800', 手續費: '13', 交易稅: '0', 應付金額: '40813', 應收金額: '0', 融資金額: '0', 保證金: '0', 利息: '0', 融券手續費: '0', 幣別: 'TWD' },
+      { 成交日: '2026/08/18', 商品: '009826 貝萊德世界股票', 買賣: '現買', 數量: '1000', 成交價: '10.18', 價金: '10180', 手續費: '3', 交易稅: '0', 應付金額: '10183', 應收金額: '0', 融資金額: '0', 保證金: '0', 利息: '0', 融券手續費: '0', 幣別: 'TWD' },
+      { 成交日: '2026/08/17', 商品: '009826 貝萊德世界股票', 買賣: '現買', 數量: '10000', 成交價: '10.28', 價金: '102800', 手續費: '33', 交易稅: '0', 應付金額: '102833', 應收金額: '0', 融資金額: '0', 保證金: '0', 利息: '0', 融券手續費: '0', 幣別: 'TWD' },
+    ]).activities.map((row, index) => activityFromSource(row, index + 2, 'account'));
+    const checked = rows.map((row) => ({
+      ...row,
+      assetId: 'asset-009826',
+      symbol: '009826',
+      exchangeMic: 'XTAI',
+      quoteCcy: 'TWD',
+      unitPrice: 10.14000034,
+    }));
+
+    const merged = checked.map((row, index) => mergeCheckedActivity(row, rows[index]));
+
+    expect(merged.map(({ quantity, unitPrice, fee, amount }) => ({ quantity, unitPrice, fee, amount }))).toEqual([
+      { quantity: '4000', unitPrice: '10.2', fee: '13', amount: '40813' },
+      { quantity: '1000', unitPrice: '10.18', fee: '3', amount: '10183' },
+      { quantity: '10000', unitPrice: '10.28', fee: '33', amount: '102833' },
+    ]);
+    expect(merged.every((row) => row.assetId === 'asset-009826' && row.exchangeMic === 'XTAI')).toBe(true);
+  });
+
   it('submits a date as midnight in the configured local timezone', () => {
     const source = convert('fubon', [{ 市場: 'TW', 買賣: 'B', 代碼: '0050', 名稱: 'ETF', 股數: '1', 價格: '1', 價金: '1', 手續費: '0', 處理費: '0', 交易費: '0', 結算費: '0', 交易稅: '0', 印花稅: '0', 應收付: '-1', 幣別: 'TWD', 交割日: '20260729' }]).activities[0];
     const imported = activityFromSource(source, 2, 'account', 'Asia/Taipei');
