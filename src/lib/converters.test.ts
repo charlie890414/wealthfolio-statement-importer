@@ -305,6 +305,36 @@ describe('economic duplicate matching', () => {
     expect(result[0].duplicateOfId).toBe('old');
   });
 
+  it('does not match trades whose settlement amounts agree but execution prices differ', () => {
+    const rows = [
+      { date: '2026-08-18', quantity: '4000', unitPrice: '10.2', fee: '13', amount: '40813' },
+      { date: '2026-08-18', quantity: '1000', unitPrice: '10.18', fee: '3', amount: '10183' },
+      { date: '2026-08-17', quantity: '10000', unitPrice: '10.28', fee: '33', amount: '102833' },
+    ].map((values, index) => ({
+      ...imported(`new-${index}`, '009826 貝萊德世界股票'),
+      ...values,
+      symbol: '009826',
+      assetId: 'asset-009826',
+    }));
+    const existing = rows.map((row, index) => ({
+      id: `old-${index}`,
+      accountId: 'account',
+      activityType: 'BUY',
+      date: row.date,
+      assetId: 'asset-009826',
+      assetSymbol: '009826',
+      quantity: row.quantity,
+      unitPrice: 10.14000034,
+      fee: row.fee,
+      amount: row.amount,
+      currency: 'TWD',
+    }));
+
+    const result = markExistingDuplicates(rows, existing, 'account');
+
+    expect(result.map((row) => row.duplicateOfId)).toEqual([undefined, undefined, undefined]);
+  });
+
   it('matches a TWD odd-lot trade when the stored unit price was derived from gross amount', () => {
     const row = imported('new', 'CSV');
     row.date = '2026-07-27';

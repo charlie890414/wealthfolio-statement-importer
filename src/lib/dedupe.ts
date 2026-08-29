@@ -138,19 +138,23 @@ const tradeSettlementKeys = (
 ) => {
   const cost = totalCost(activity);
   const candidates: string[] = [];
+  const quantity = field(activity.quantity);
+  const unitPrice = field(activity.unitPrice);
   const explicit = field(activity.amount);
-  if (explicit) {
+  // When quantity and execution price are both available, they are the
+  // authoritative trade identity. Using amount as an independent candidate
+  // would mark a corrected import as duplicate of an older row whose price was
+  // overwritten by a market quote but whose amount happened to remain intact.
+  if (explicit && (!quantity || !unitPrice)) {
     const amount = new Big(explicit);
     // Addon imports carry broker settlement totals, while persisted Wealthfolio
     // trades normally carry gross consideration. Keep the raw existing amount
-    // as a compatibility candidate for older imports that already stored net.
+    // as a compatibility candidate only for older rows lacking price data.
     candidates.push(roundedMoney(amount, currency));
     if (role === 'existing') {
       candidates.push(roundedMoney(settlementAmount(type, amount, cost), currency));
     }
   }
-  const quantity = field(activity.quantity);
-  const unitPrice = field(activity.unitPrice);
   if (quantity && unitPrice) {
     const gross = new Big(quantity).times(unitPrice).times(optionMultiplier(activity));
     candidates.push(roundedMoney(settlementAmount(type, gross, cost), currency));
