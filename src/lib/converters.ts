@@ -104,10 +104,14 @@ const schwabTradePrice = (row: Record<string, string>, side: 'BUY' | 'SELL', mul
   return gross.div(quantity.times(multiplier)).toString();
 };
 const schwabReinvestPrice = (row: Record<string, string>) => {
-  // Reinvest Shares has two different values in Schwab's export: Price is the
-  // per-share execution price, while Amount is the rounded cash settlement.
-  // Keep Price for the lot basis and retain Amount for the cash movement.
-  return money(row.Price);
+  // Wealthfolio derives BUY cash from quantity × unit price rather than Amount.
+  // Schwab rounds both the reported fractional quantity and cash settlement, so
+  // using the execution Price accumulates fractional-cent cash drift. Derive the
+  // effective price from the settled Amount to keep the cash ledger exact.
+  const quantity = decimal(row.Quantity).abs();
+  const settlement = decimal(row.Amount).abs();
+  if (quantity.eq(0) || settlement.eq(0)) return money(row.Price);
+  return settlement.div(quantity).toString();
 };
 const schwabDividendSymbol = (symbol: string, description: string) => {
   if (symbol) return symbol;

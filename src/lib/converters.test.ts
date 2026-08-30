@@ -200,7 +200,7 @@ describe('broker converters', () => {
     expect(result.activities[0]).toMatchObject({ quantity: '2', unitPrice: '100', fee: '2', amount: '202' });
   });
 
-  it('normalizes Schwab cash directions and preserves reinvestment execution prices', () => {
+  it('normalizes Schwab cash directions and derives reinvestment price from settlement amount', () => {
     const result = convert('schwab', [
       { Date: '03/29/2022', Action: 'Reinvest Shares', Symbol: 'VOO', Description: 'Bought fractional shares', Quantity: '0.002', Price: '$421.7638', 'Fees & Comm': '', Amount: '-$0.96' },
       { Date: '03/29/2022', Action: 'NRA Tax Adj', Symbol: 'VOO', Description: 'Tax', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '-$0.41' },
@@ -217,7 +217,7 @@ describe('broker converters', () => {
       { activityType: 'WITHDRAWAL', amount: '13295.79' },
       { activityType: 'WITHDRAWAL', amount: '9' },
     ]);
-    expect(result.activities[0].unitPrice).toBe('421.7638');
+    expect(result.activities[0].unitPrice).toBe('480');
   });
 
   it('recovers a ticker from an older Schwab dividend description', () => {
