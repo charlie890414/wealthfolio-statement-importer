@@ -200,6 +200,30 @@ describe('broker converters', () => {
     expect(result.activities[0]).toMatchObject({ quantity: '2', unitPrice: '100', fee: '2', amount: '202' });
   });
 
+  it('uses currency rounding before correcting broker trade prices', () => {
+    const usdRounded = convert('schwab', [
+      { Date: '08/21/2026', Action: 'Buy', Symbol: 'AAPL', Description: 'sub-cent price', Quantity: '1', Price: '$10.004', 'Fees & Comm': '', Amount: '-$10.00' },
+    ]).activities[0];
+    const twdRounded = convert('sinopac', [
+      { 成交日: '2026/08/18', 商品: '009826 貝萊德', 買賣: '現買', 數量: '1', 成交價: '10.4', 價金: '10.4', 手續費: '0', 交易稅: '0', 應付金額: '10', 應收金額: '0', 幣別: 'TWD' },
+    ]).activities[0];
+
+    expect(usdRounded.unitPrice).toBe('10.004');
+    expect(twdRounded.unitPrice).toBe('10.4');
+  });
+
+  it('corrects buy and sell prices from settlement amounts without counting fees twice', () => {
+    const buy = convert('fubon', [
+      { 市場: 'GB', 買賣: 'B', 代碼: 'FWRA.LSE1', 名稱: 'ETF', 股數: '2', 價格: '9', 價金: '18', 手續費: '1', 處理費: '0', 交易費: '0', 結算費: '0', 交易稅: '0', 印花稅: '0', 應收付: '-20', 幣別: 'USD', 交割日: '20260720' },
+    ]).activities[0];
+    const sell = convert('sinopac', [
+      { 成交日: '2026/08/18', 商品: '009826 貝萊德', 買賣: '現賣', 數量: '10', 成交價: '10', 價金: '100', 手續費: '1', 交易稅: '0', 應付金額: '0', 應收金額: '98', 幣別: 'TWD' },
+    ]).activities[0];
+
+    expect(buy.unitPrice).toBe('9.5');
+    expect(sell.unitPrice).toBe('9.9');
+  });
+
   it('normalizes Schwab cash directions and derives reinvestment price from settlement amount', () => {
     const result = convert('schwab', [
       { Date: '03/29/2022', Action: 'Reinvest Shares', Symbol: 'VOO', Description: 'Bought fractional shares', Quantity: '0.002', Price: '$421.7638', 'Fees & Comm': '', Amount: '-$0.96' },
@@ -218,6 +242,48 @@ describe('broker converters', () => {
       { activityType: 'WITHDRAWAL', amount: '9' },
     ]);
     expect(result.activities[0].unitPrice).toBe('480');
+  });
+
+  it('excludes matched TDA to Schwab migration legs', () => {
+    const result = convert('schwab', [
+      { Date: '05/13/2024', Action: 'Journaled Shares', Symbol: '', Description: 'TDA TRAN - CASH MOVEMENT OF OUTGOING ACCOUNT TRANSFER', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '-$13295.79' },
+      { Date: '05/13/2024', Action: 'Journaled Shares', Symbol: 'SPLG', Description: 'TDA TRAN - TRANSFER OF SECURITY OR OPTION OUT (SPLG)', Quantity: '-125.629', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Journaled Shares', Symbol: 'QQQM', Description: 'TDA TRAN - TRANSFER OF SECURITY OR OPTION OUT (QQQM)', Quantity: '-8.091', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Journaled Shares', Symbol: 'VT', Description: 'TDA TRAN - TRANSFER OF SECURITY OR OPTION OUT (VT)', Quantity: '-49.276', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Journaled Shares', Symbol: 'VOO', Description: 'TDA TRAN - TRANSFER OF SECURITY OR OPTION OUT (VOO)', Quantity: '-1.025', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Internal Transfer', Symbol: 'QQQM', Description: 'INVESCO NASDAQ ...100 ETF', Quantity: '8.091', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Internal Transfer', Symbol: 'VT', Description: 'VANGUARD TOTAL WORLD STOCK ETF', Quantity: '49.276', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Internal Transfer', Symbol: 'SPLG', Description: 'SPDR PORTFOLIO S&P ...500 ETF', Quantity: '125.629', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Internal Transfer', Symbol: 'VOO', Description: 'VANGUARD S&P ...500 ETF', Quantity: '1.025', Price: '', 'Fees & Comm': '', Amount: '' },
+      { Date: '05/13/2024', Action: 'Internal Transfer', Symbol: '', Description: 'TDA TO CS&CO TRANSFER', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '$13295.79' },
+    ]);
+
+    expect(result.issues).toHaveLength(0);
+    expect(result.activities).toHaveLength(0);
+  });
+
+  it('keeps unmatched Schwab internal transfers', () => {
+    const result = convert('schwab', [{
+      Date: '05/14/2024', Action: 'Internal Transfer', Symbol: 'VOO', Description: 'Unrelated transfer',
+      Quantity: '1', Price: '', 'Fees & Comm': '', Amount: '',
+    }]);
+
+    expect(result.activities).toHaveLength(1);
+    expect(result.activities[0]).toMatchObject({ activityType: 'DEPOSIT', symbol: 'VOO', quantity: '1' });
+  });
+
+  it('excludes reusable Taiwan warrant symbols but keeps ETF symbols', () => {
+    const result = convert('sinopac', [
+      { 成交日: '2026/08/18', 商品: '030001 台積電元大購01', 買賣: '現買', 數量: '1', 成交價: '1', 價金: '1', 手續費: '0', 交易稅: '0', 應付金額: '1', 應收金額: '0', 幣別: 'TWD' },
+      { 成交日: '2026/08/18', 商品: '03001P 台積電元大售01', 買賣: '現賣', 數量: '1', 成交價: '1', 價金: '1', 手續費: '0', 交易稅: '0', 應付金額: '0', 應收金額: '1', 幣別: 'TWD' },
+      { 成交日: '2026/08/18', 商品: '006208 富邦台50', 買賣: '現買', 數量: '1', 成交價: '100', 價金: '100', 手續費: '0', 交易稅: '0', 應付金額: '100', 應收金額: '0', 幣別: 'TWD' },
+    ]);
+
+    expect(result.activities.map((row) => row.symbol)).toEqual(['006208']);
+    expect(result.issues).toEqual([
+      { lineNumber: 2, message: '已排除代號可能重複使用的台股權證：030001', severity: 'warning' },
+      { lineNumber: 3, message: '已排除代號可能重複使用的台股權證：03001P', severity: 'warning' },
+    ]);
   });
 
   it('recovers a ticker from an older Schwab dividend description', () => {
@@ -246,16 +312,16 @@ describe('broker converters', () => {
     expect(result.activities.map((row) => row.activityType)).toEqual(['BUY']);
   });
 
-  it('keeps distinct Fundrich conversion amounts and fees', () => {
+  it('uses Fundrich net settlement amounts and fees for conversions', () => {
     const result = convert('fundrich', [
       { '基金代碼': 'ALI063', '交易類別': '轉換出', '基金名稱': '安聯四季雙收入息組合基金', '交易日期': '2020-10-27', '淨值（幣別）': 'TWD', '淨值': '10.43', '交易金額（含手續費）': '40,581', '單位數': '3,890.8', '總金額': '40,347', '交易狀態': '交易成功' },
       { '基金代碼': 'ALI019', '交易類別': '轉換入', '基金名稱': '安聯四季雙收入息組合基金', '交易日期': '2020-10-27', '淨值（幣別）': 'TWD', '淨值': '11.96', '交易金額（含手續費）': '40,163', '單位數': '3,358.2', '總金額': '40,347', '交易狀態': '交易成功' },
     ]);
 
     expect(result.issues).toHaveLength(0);
-    expect(result.activities.map(({ activityType, amount, fee }) => ({ activityType, amount, fee }))).toEqual([
-      { activityType: 'SELL', amount: '40581', fee: '234' },
-      { activityType: 'BUY', amount: '40163', fee: '184' },
+    expect(result.activities.map(({ activityType, unitPrice, amount, fee }) => ({ activityType, unitPrice, amount, fee }))).toEqual([
+      { activityType: 'SELL', unitPrice: '10.43', amount: '40347', fee: '234' },
+      { activityType: 'BUY', unitPrice: '11.95968078', amount: '40347', fee: '184' },
     ]);
   });
 

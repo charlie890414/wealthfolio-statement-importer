@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Derive Schwab reinvestment unit prices from settled amount and quantity to prevent fractional-cent cash drift.
+- Exclude matched TDA-to-Schwab migration legs and reusable Taiwan warrant symbols from imports.
 
 ### Security
 

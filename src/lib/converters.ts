@@ -30,6 +30,24 @@ const absoluteMoney = (value: unknown) => {
 const asFloat = (value: unknown) => Number(number(value) || 0);
 const decimal = (value: unknown) => new Big(number(value) || 0);
 const decimalString = (value: Big) => value.toString();
+const currencyDecimalPlaces = (currency: string) => currency.toUpperCase() === 'TWD' ? 0 : 2;
+const reconcileTradePrice = (activity: NormalizedActivity): NormalizedActivity => {
+  if (!['BUY', 'SELL'].includes(activity.activityType) || !activity.quantity || !activity.unitPrice || !activity.amount) return activity;
+  const quantity = decimal(activity.quantity).abs();
+  const settlement = decimal(activity.amount).abs();
+  if (quantity.eq(0) || settlement.eq(0)) return activity;
+
+  const fee = decimal(activity.fee).abs();
+  const multiplier = activity.instrumentType === 'OPTION' ? new Big(100) : new Big(1);
+  const gross = quantity.times(decimal(activity.unitPrice).abs()).times(multiplier);
+  const calculatedSettlement = activity.activityType === 'BUY' ? gross.plus(fee) : gross.minus(fee);
+  const decimalPlaces = currencyDecimalPlaces(activity.currency);
+  if (calculatedSettlement.round(decimalPlaces, Big.roundHalfUp).eq(settlement.round(decimalPlaces, Big.roundHalfUp))) return activity;
+
+  const correctedGross = activity.activityType === 'BUY' ? settlement.minus(fee) : settlement.plus(fee);
+  if (correctedGross.lte(0)) return activity;
+  return { ...activity, unitPrice: correctedGross.div(quantity.times(multiplier)).round(8, Big.roundHalfUp).toString() };
+};
 const isoDate = (value: string, formats: string[] = ['YYYY-MM-DD']) => {
   const s = value.trim();
   if (/^\d{4}[-/]\d{2}[-/]\d{2}$/.test(s)) return assertValidCalendarDate(s.split('/').join('-'));
@@ -41,6 +59,9 @@ const isoDate = (value: string, formats: string[] = ['YYYY-MM-DD']) => {
   throw new Error(`無法解析日期：${value}`);
 };
 const issue = (issues: ConversionIssue[], lineNumber: number, message: string, severity: ConversionIssue['severity'] = 'error') => issues.push({ lineNumber, message, severity });
+// TWSE warrant symbols are reusable. Importing them by symbol can therefore
+// attach an old transaction to a different warrant that later reused the code.
+const isTaiwanWarrantCode = (value: string) => /^(?:0[3-8]\d{4}|0[3-8]\d{3}[PUTFQCBXY])$/i.test(value.trim());
 export function detectBroker(headers: string[]): BrokerDetection {
   const has = (required: string[]) => required.filter((header) => !headers.includes(header));
   const candidates: Array<[BrokerKind, string[]]> = [['fubon', FUBON_HEADERS], ['sinopac', SINOPAC_HEADERS], ['schwab', SCHWAB_HEADERS], ['fundrich', FUNDRICH_HEADERS]];
@@ -59,6 +80,7 @@ function fubon(rows: Array<Record<string, string>>, issues: ConversionIssue[]): 
       if (!['B', 'S'].includes(side)) throw new Error(`未支援的買賣類別：${row['買賣']}`);
       const settle = isoDate(row['交割日']); const date = settle;
       const market = row['市場']?.trim().toUpperCase(); const code = row['代碼']?.trim();
+      if (market === 'TW' && isTaiwanWarrantCode(code)) { issue(issues, line, `已排除代號可能重複使用的台股權證：${code}`, 'warning'); continue; }
       const suffix: Record<string, string> = { GB: 'L', TW: 'TW', HK: 'HK', JP: 'T', DE: 'DE', FR: 'PA', NL: 'AS', CH: 'SW', CA: 'TO', AU: 'AX' };
       const base = code.split(/[.\s]/)[0]; const symbol = suffix[market] ? `${base}.${suffix[market]}` : base;
       const fee = ['手續費', '處理費', '交易費', '結算費', '交易稅', '印花稅'].reduce((sum, key) => sum.plus(decimal(row[key])), new Big(0));
@@ -79,6 +101,7 @@ function sinopac(rows: Array<Record<string, string>>, issues: ConversionIssue[])
       const side = row['買賣']?.trim(); if (!['現買', '現賣'].includes(side)) throw new Error(`未支援的買賣類別或非現金交易：${row['買賣']}`);
       for (const key of ['融資金額', '保證金', '利息', '融券手續費']) if (asFloat(row[key])) throw new Error('不支援融資、融券或其他非現金交易');
       const date = isoDate(row['成交日']); const [code, ...nameParts] = (row['商品'] || '').trim().split(/\s+/); const name = nameParts.join(' '); const currency = row['幣別']?.trim() || 'TWD';
+      if (isTaiwanWarrantCode(code)) { issue(issues, line, `已排除代號可能重複使用的台股權證：${code}`, 'warning'); continue; }
       const type = side === '現買' ? 'BUY' : 'SELL'; const fee = decimal(row['手續費']).plus(decimal(row['交易稅']));
       // Sinopac reports the settled cash total in separate buy/sell columns.
       // Keep that economic amount on the activity so preview, native checking,
@@ -94,25 +117,6 @@ function sinopac(rows: Array<Record<string, string>>, issues: ConversionIssue[])
 const schwabOption = (action: string) => ({ 'Sell to Open': ['SELL', 'OPTION_OPEN'], 'Buy to Close': ['BUY', 'OPTION_CLOSE'], Expired: ['ADJUSTMENT', 'OPTION_EXPIRE'] } as Record<string, string[]>)[action];
 const occ = (symbol: string) => { const m = symbol.match(/^(.+?)\s+(\d{2})\/(\d{2})\/(\d{4})\s+([\d.]+)\s+([CP])$/); if (!m) return symbol; return `${m[1].trim().toUpperCase().slice(0, 6)}${m[4].slice(-2)}${m[2]}${m[3]}${m[6]}${decimal(m[5]).times(1000).round().toString().padStart(8, '0')}`; };
 const isBond = (symbol: string) => /^[A-Z0-9]{9}$/.test(symbol) && /\d/.test(symbol);
-const schwabTradePrice = (row: Record<string, string>, side: 'BUY' | 'SELL', multiplier = 1) => {
-  const quantity = decimal(row.Quantity).abs();
-  const settlement = decimal(row.Amount).abs();
-  const fee = decimal(row['Fees & Comm']).abs();
-  if (quantity.eq(0) || settlement.eq(0)) return money(row.Price);
-  const gross = side === 'BUY' ? settlement.minus(fee) : settlement.plus(fee);
-  if (gross.lte(0)) return money(row.Price);
-  return gross.div(quantity.times(multiplier)).toString();
-};
-const schwabReinvestPrice = (row: Record<string, string>) => {
-  // Wealthfolio derives BUY cash from quantity × unit price rather than Amount.
-  // Schwab rounds both the reported fractional quantity and cash settlement, so
-  // using the execution Price accumulates fractional-cent cash drift. Derive the
-  // effective price from the settled Amount to keep the cash ledger exact.
-  const quantity = decimal(row.Quantity).abs();
-  const settlement = decimal(row.Amount).abs();
-  if (quantity.eq(0) || settlement.eq(0)) return money(row.Price);
-  return settlement.div(quantity).toString();
-};
 const schwabDividendSymbol = (symbol: string, description: string) => {
   if (symbol) return symbol;
   // Older Schwab/TDA rows put the ticker only in descriptions such as
@@ -151,8 +155,45 @@ function mergeSchwabSameAmountTrades(rows: NormalizedActivity[]): NormalizedActi
   return merged;
 }
 
+function schwabTdaMigrationRowIndexes(rows: Array<Record<string, string>>): Set<number> {
+  const excluded = new Set<number>();
+  const outgoingByKey = new Map<string, number[]>();
+  const key = (row: Record<string, string>, kind: 'cash' | 'security') => [
+    row.Date?.trim() || '',
+    kind === 'security' ? row.Symbol?.trim().toUpperCase() || '' : '',
+    decimal(kind === 'security' ? row.Quantity : row.Amount).abs().toString(),
+  ].join('|');
+
+  rows.forEach((row, index) => {
+    if (row.Action?.trim() !== 'Journaled Shares') return;
+    const description = row.Description?.trim().toUpperCase() || '';
+    const kind = description.includes('CASH MOVEMENT OF OUTGOING ACCOUNT TRANSFER')
+      ? 'cash'
+      : description.includes('TRANSFER OF SECURITY OR OPTION OUT') ? 'security' : null;
+    if (!kind) return;
+    const rowKey = key(row, kind);
+    const queue = outgoingByKey.get(rowKey) ?? [];
+    queue.push(index);
+    outgoingByKey.set(rowKey, queue);
+  });
+
+  rows.forEach((row, index) => {
+    if (row.Action?.trim() !== 'Internal Transfer') return;
+    const isCash = !row.Symbol?.trim() && (row.Description?.trim().toUpperCase() || '').includes('TDA TO CS&CO TRANSFER');
+    const kind = isCash ? 'cash' : 'security';
+    const queue = outgoingByKey.get(key(row, kind));
+    const outgoingIndex = queue?.shift();
+    if (outgoingIndex === undefined) return;
+    excluded.add(outgoingIndex);
+    excluded.add(index);
+  });
+
+  return excluded;
+}
+
 function schwab(rows: Array<Record<string, string>>, issues: ConversionIssue[]): NormalizedActivity[] {
   const output: NormalizedActivity[] = [];
+  const tdaMigrationRows = schwabTdaMigrationRowIndexes(rows);
   const bondCosts = new Map<string, Big>();
   for (const row of rows) {
     if (row.Action?.trim() !== 'Buy' || !isBond(row.Symbol?.trim() || '')) continue;
@@ -165,6 +206,7 @@ function schwab(rows: Array<Record<string, string>>, issues: ConversionIssue[]):
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i]; const line = i + 2; const action = row.Action?.trim();
     try {
+      if (tdaMigrationRows.has(i)) continue;
       if (action === 'Journal') continue;
       const date = isoDate(row.Date, ['MM/DD/YYYY']); const rawSymbol = row.Symbol?.trim(); const symbol = occ(rawSymbol); const desc = row.Description?.trim() || ''; const descUpper = desc.toUpperCase();
       const base: NormalizedActivity = { ...empty(), date, symbol, quantity: absoluteMoney(row.Quantity), unitPrice: money(row.Price), fee: absoluteMoney(row['Fees & Comm']), amount: absoluteMoney(row.Amount), currency: 'USD', comment: desc };
@@ -191,11 +233,11 @@ function schwab(rows: Array<Record<string, string>>, issues: ConversionIssue[]):
       // above remains.
       if (isBond(rawSymbol || '')) continue;
       const option = schwabOption(action);
-      if (option) { base.activityType = option[0]; base.subtype = option[1]; base.instrumentType = 'OPTION'; if (!base.quantity) base.quantity = '1'; if (option[0] === 'BUY' || option[0] === 'SELL') base.unitPrice = schwabTradePrice(row, option[0] as 'BUY' | 'SELL', 100); output.push(base); continue; }
+      if (option) { base.activityType = option[0]; base.subtype = option[1]; base.instrumentType = 'OPTION'; if (!base.quantity) base.quantity = '1'; output.push(base); continue; }
       if (action === 'Assigned') { base.activityType = 'ADJUSTMENT'; base.subtype = 'OPTION_ASSIGNMENT'; base.instrumentType = 'OPTION'; base.unitPrice = ''; base.amount = ''; output.push(base); continue; }
       if (action === 'Stock Split') { base.activityType = 'SPLIT'; base.unitPrice = base.unitPrice || '1'; base.amount = ''; output.push(base); continue; }
       if (action === 'Full Redemption') { base.activityType = 'SELL'; base.instrumentType = isBond(rawSymbol) ? 'BOND' : ''; base.quantity = base.quantity.replace('-', ''); base.unitPrice = '1'; base.amount = base.quantity; output.push(base); continue; }
-      if (action === 'Buy' || action === 'Reinvest Shares' || action === 'Sell') { base.activityType = action === 'Sell' ? 'SELL' : 'BUY'; base.unitPrice = action === 'Reinvest Shares' ? schwabReinvestPrice(row) : schwabTradePrice(row, base.activityType as 'BUY' | 'SELL'); if (isBond(symbol)) base.instrumentType = 'BOND'; output.push(base); continue; }
+      if (action === 'Buy' || action === 'Reinvest Shares' || action === 'Sell') { base.activityType = action === 'Sell' ? 'SELL' : 'BUY'; if (isBond(symbol)) base.instrumentType = 'BOND'; output.push(base); continue; }
       if (['Cash Dividend', 'Qualified Dividend', 'Reinvest Dividend', 'Qual Div Reinvest'].includes(action)) { base.activityType = 'DIVIDEND'; base.symbol = schwabDividendSymbol(rawSymbol, desc); base.quantity = '1'; base.unitPrice = '1'; base.instrumentType = ''; output.push(base); continue; }
       if (['Bond Interest', 'Credit Interest'].includes(action)) { base.activityType = 'INTEREST'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue; }
       if (action === 'NRA Tax Adj' || (action === 'Journaled Shares' && descUpper.includes('W-8 WITHHOLDING'))) { base.activityType = 'TAX'; base.symbol = ''; base.quantity = ''; base.unitPrice = ''; base.instrumentType = ''; output.push(base); continue; }
@@ -227,13 +269,8 @@ function fundrich(rows: Array<Record<string, string>>, issues: ConversionIssue[]
         ? grossDecimal.minus(transferNet).abs()
         : new Big(0);
       const feeDecimal = explicitFee.gt(0) ? explicitFee : inferredTransferFee;
-      const priceDecimal = grossDecimal.gt(0) && quantityDecimal.gt(0) ? grossDecimal.div(quantityDecimal) : navDecimal;
-      // Keep the consideration for each fund leg as the trade amount. For a
-      // conversion, 總金額 is the shared net amount transferred between
-      // the outgoing and incoming funds, so using it would make both legs look
-      // identical and hide their respective fees.
-      const amount = absoluteMoney(row['交易金額（含手續費）'] || row['交易金額'] || row['總金額']);
-      const trade: NormalizedActivity = { ...empty(), date, symbol: row['基金代碼'], instrumentType: 'FUND', quantity: quantityDecimal.toString(), activityType: type, unitPrice: priceDecimal.toFixed(8), currency, fee: decimalString(feeDecimal), amount, comment: `基富通 | ${(row['基金名稱'] || '').replace(/^【[^】]*】/, '')} | ${row['交易類別']}` };
+      const amount = absoluteMoney(row['總金額'] || row['交易金額（含手續費）'] || row['交易金額']);
+      const trade: NormalizedActivity = { ...empty(), date, symbol: row['基金代碼'], instrumentType: 'FUND', quantity: quantityDecimal.toString(), activityType: type, unitPrice: navDecimal.toString(), currency, fee: decimalString(feeDecimal), amount, comment: `基富通 | ${(row['基金名稱'] || '').replace(/^【[^】]*】/, '')} | ${row['交易類別']}` };
       output.push(trade);
     } catch (error) { issue(issues, line, error instanceof Error ? error.message : String(error)); }
   }
@@ -243,5 +280,5 @@ function fundrich(rows: Array<Record<string, string>>, issues: ConversionIssue[]
 export function convert(broker: BrokerKind, rows: Array<Record<string, string>>): ConversionResult {
   const issues: ConversionIssue[] = []; let activities: NormalizedActivity[];
   if (broker === 'fubon') activities = fubon(rows, issues); else if (broker === 'sinopac') activities = sinopac(rows, issues); else if (broker === 'schwab') activities = schwab(rows, issues); else activities = fundrich(rows, issues);
-  return { broker, sourceRows: rows.length, activities: validateNormalizedActivities(activities, issues), issues };
+  return { broker, sourceRows: rows.length, activities: validateNormalizedActivities(activities.map(reconcileTradePrice), issues), issues };
 }
