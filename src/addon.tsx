@@ -8,6 +8,7 @@ import { parseCsv, rowsAsObjects, stringifyActivities } from './lib/csv';
 import { activityFromSource, allImportRowNumbers, checkImportInBatches, dateInRange, mergeCheckedActivity, selectImportRows, type CheckedActivity } from './lib/import';
 import { markExistingDuplicates, sameDayNonDuplicateReason, type ExistingActivityForDedupe } from './lib/dedupe';
 import type { ConversionIssue, NormalizedActivity } from './lib/types';
+import { resolveAssetTypesFromMarket } from './lib/asset-types';
 
 let addonCtx: AddonContext | undefined;
 type TickerResult = { symbol: string; canonicalSymbol?: string; canonicalExchangeMic?: string; exchangeMic?: string; currency?: string; quoteType?: string; providerId?: string; providerSymbol?: string; longName?: string };
@@ -139,11 +140,16 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
         const mappedSymbol = savedMapping?.symbolMappings?.[sourceSymbol];
         return mappedSymbol ? { ...row, sourceSymbol, symbol: mappedSymbol } : { ...row, sourceSymbol };
       });
+      const marketResolution = await resolveAssetTypesFromMarket(
+        mappedRows,
+        (query) => ctx.api.market.searchTicker(query) as Promise<TickerResult[]>,
+      );
       setFileName(file.name); setBroker(detection.broker); setIssues(result.issues);
-      if (!mappedRows.length) throw new Error('CSV 沒有可匯入的活動');
-      const preview = mappedRows.map((row, index) => activityFromSource(row, index + 1, accountId));
+      if (!marketResolution.rows.length) throw new Error('CSV 沒有可匯入的活動');
+      const preview = marketResolution.rows.map((row, index) => activityFromSource(row, index + 1, accountId));
       setActivities(preview); setSelectedRows(allImportRowNumbers(preview));
-      setMessage(`已讀取 ${result.sourceRows} 筆來源資料，轉換為 ${result.activities.length} 筆活動。`);
+      const unresolved = marketResolution.rows.filter((row) => row.symbol && !row.instrumentType).length;
+      setMessage(`已讀取 ${result.sourceRows} 筆來源資料，轉換為 ${result.activities.length} 筆活動；市場資料確認 ${marketResolution.resolved} 筆資產類型${unresolved ? `，${unresolved} 筆未確認，請在驗證後檢查或映射` : ''}${marketResolution.failed ? `（${marketResolution.failed} 筆查詢失敗）` : ''}。`);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }

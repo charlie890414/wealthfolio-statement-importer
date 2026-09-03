@@ -6,6 +6,7 @@ import type {
   NormalizedActivity,
 } from './types';
 import Big from 'big.js';
+import { moneyDecimalPlaces } from './money';
 import { assertValidCalendarDate, validateNormalizedActivities } from './validation';
 
 const FUBON_HEADERS = ['市場', '買賣', '代碼', '名稱', '股數', '價格', '價金', '應收付', '幣別', '交割日'];
@@ -30,7 +31,6 @@ const absoluteMoney = (value: unknown) => {
 const asFloat = (value: unknown) => Number(number(value) || 0);
 const decimal = (value: unknown) => new Big(number(value) || 0);
 const decimalString = (value: Big) => value.toString();
-const currencyDecimalPlaces = (currency: string) => currency.toUpperCase() === 'TWD' ? 0 : 2;
 const reconcileTradePrice = (activity: NormalizedActivity): NormalizedActivity => {
   if (!['BUY', 'SELL'].includes(activity.activityType) || !activity.quantity || !activity.unitPrice || !activity.amount) return activity;
   const quantity = decimal(activity.quantity).abs();
@@ -41,7 +41,7 @@ const reconcileTradePrice = (activity: NormalizedActivity): NormalizedActivity =
   const multiplier = activity.instrumentType === 'OPTION' ? new Big(100) : new Big(1);
   const gross = quantity.times(decimal(activity.unitPrice).abs()).times(multiplier);
   const calculatedSettlement = activity.activityType === 'BUY' ? gross.plus(fee) : gross.minus(fee);
-  const decimalPlaces = currencyDecimalPlaces(activity.currency);
+  const decimalPlaces = moneyDecimalPlaces(activity.currency);
   if (calculatedSettlement.round(decimalPlaces, Big.roundHalfUp).eq(settlement.round(decimalPlaces, Big.roundHalfUp))) return activity;
 
   const correctedGross = activity.activityType === 'BUY' ? settlement.minus(fee) : settlement.plus(fee);
@@ -62,6 +62,20 @@ const issue = (issues: ConversionIssue[], lineNumber: number, message: string, s
 // TWSE warrant symbols are reusable. Importing them by symbol can therefore
 // attach an old transaction to a different warrant that later reused the code.
 const isTaiwanWarrantCode = (value: string) => /^(?:0[3-8]\d{4}|0[3-8]\d{3}[PUTFQCBXY])$/i.test(value.trim());
+export function inferInstrumentType(input: {
+  broker: BrokerKind;
+  symbol: string;
+  name?: string;
+  market?: string;
+  action?: string;
+}): string {
+  const symbol = input.symbol.trim().toUpperCase();
+  if (input.broker === 'schwab') {
+    if (schwabOption(input.action || '') || /\d{2}\/\d{2}\/\d{4}\s+[\d.]+\s+[CP]$/.test(symbol)) return 'OPTION';
+    if (isBond(symbol)) return 'BOND';
+  }
+  return '';
+}
 export function detectBroker(headers: string[]): BrokerDetection {
   const has = (required: string[]) => required.filter((header) => !headers.includes(header));
   const candidates: Array<[BrokerKind, string[]]> = [['fubon', FUBON_HEADERS], ['sinopac', SINOPAC_HEADERS], ['schwab', SCHWAB_HEADERS], ['fundrich', FUNDRICH_HEADERS]];
@@ -85,14 +99,13 @@ function fubon(rows: Array<Record<string, string>>, issues: ConversionIssue[]): 
       const base = code.split(/[.\s]/)[0]; const symbol = suffix[market] ? `${base}.${suffix[market]}` : base;
       const fee = ['手續費', '處理費', '交易費', '結算費', '交易稅', '印花稅'].reduce((sum, key) => sum.plus(decimal(row[key])), new Big(0));
       const currency = row['幣別']?.trim() || 'USD';
-      const trade: NormalizedActivity = { ...empty(), date, symbol, instrumentType: 'ETF', quantity: money(row['股數']), activityType: side === 'B' ? 'BUY' : 'SELL', unitPrice: money(row['價格']), currency, fee: decimalString(fee), amount: absoluteMoney(row['應收付']), comment: `${code} | ${row['名稱']?.trim() || ''} | 市場:${market} 交割日:${settle}（CSV 日期）`, };
+      const trade: NormalizedActivity = { ...empty(), date, symbol, instrumentType: inferInstrumentType({ broker: 'fubon', symbol: code, name: row['名稱'], market }), quantity: money(row['股數']), activityType: side === 'B' ? 'BUY' : 'SELL', unitPrice: money(row['價格']), currency, fee: decimalString(fee), amount: absoluteMoney(row['應收付']), comment: `${code} | ${row['名稱']?.trim() || ''} | 市場:${market} 交割日:${settle}（CSV 日期）`, };
       output.push(trade);
     } catch (error) { issue(issues, line, error instanceof Error ? error.message : String(error)); }
   }
   return output;
 }
 
-const SINOPAC_ETFS = new Set(['0050', '0051', '0056', '006201', '006208', '00631L', '00632R', '00663L', '00878', '00885']);
 function sinopac(rows: Array<Record<string, string>>, issues: ConversionIssue[]): NormalizedActivity[] {
   const output: NormalizedActivity[] = [];
   for (let i = 0; i < rows.length; i += 1) {
@@ -107,7 +120,7 @@ function sinopac(rows: Array<Record<string, string>>, issues: ConversionIssue[])
       // Keep that economic amount on the activity so preview, native checking,
       // and addon duplicate matching all see the same transaction value.
       const amount = side === '現買' ? money(row['應付金額']) : money(row['應收金額']);
-      const trade: NormalizedActivity = { ...empty(), date, symbol: code, instrumentType: SINOPAC_ETFS.has(code) ? 'ETF' : 'EQUITY', quantity: money(row['數量']), activityType: type, unitPrice: money(row['成交價']), currency, fee: decimalString(fee), amount, comment: `${code} ${name}`.trim() };
+      const trade: NormalizedActivity = { ...empty(), date, symbol: code, instrumentType: inferInstrumentType({ broker: 'sinopac', symbol: code, name }), quantity: money(row['數量']), activityType: type, unitPrice: money(row['成交價']), currency, fee: decimalString(fee), amount, comment: `${code} ${name}`.trim() };
       output.push(trade);
     } catch (error) { issue(issues, line, error instanceof Error ? error.message : String(error)); }
   }
@@ -209,7 +222,7 @@ function schwab(rows: Array<Record<string, string>>, issues: ConversionIssue[]):
       if (tdaMigrationRows.has(i)) continue;
       if (action === 'Journal') continue;
       const date = isoDate(row.Date, ['MM/DD/YYYY']); const rawSymbol = row.Symbol?.trim(); const symbol = occ(rawSymbol); const desc = row.Description?.trim() || ''; const descUpper = desc.toUpperCase();
-      const base: NormalizedActivity = { ...empty(), date, symbol, quantity: absoluteMoney(row.Quantity), unitPrice: money(row.Price), fee: absoluteMoney(row['Fees & Comm']), amount: absoluteMoney(row.Amount), currency: 'USD', comment: desc };
+      const base: NormalizedActivity = { ...empty(), date, symbol, instrumentType: inferInstrumentType({ broker: 'schwab', symbol: rawSymbol, name: desc, action }), quantity: absoluteMoney(row.Quantity), unitPrice: money(row.Price), fee: absoluteMoney(row['Fees & Comm']), amount: absoluteMoney(row.Amount), currency: 'USD', comment: desc };
       if (action === 'Full Redemption Adj' && isBond(rawSymbol || '')) {
         const principal = decimal(row.Amount).abs();
         const cost = bondCosts.get(rawSymbol || '');

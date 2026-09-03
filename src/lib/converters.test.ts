@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ActivityImport } from '@wealthfolio/addon-sdk';
-import { convert, detectBroker } from './converters';
+import { convert, detectBroker, inferInstrumentType } from './converters';
 import { parseCsv, stringifyActivities } from './csv';
 import { activityFromSource, allImportRowNumbers, checkImportInBatches, dateInRange, mergeCheckedActivity, requireResolvedOption, selectImportRows } from './import';
 import { markExistingDuplicates, sameDayNonDuplicateReason } from './dedupe';
@@ -151,6 +151,13 @@ describe('CSV parsing', () => {
 });
 
 describe('broker converters', () => {
+  it('does not guess broker asset types from symbols or descriptions', () => {
+    expect(inferInstrumentType({ broker: 'fubon', symbol: '2330', name: '台積電', market: 'TW' })).toBe('');
+    expect(inferInstrumentType({ broker: 'sinopac', symbol: '009826', name: 'ETF' })).toBe('');
+    expect(inferInstrumentType({ broker: 'schwab', symbol: 'VOO', name: 'VANGUARD S&P 500 ETF' })).toBe('');
+    expect(inferInstrumentType({ broker: 'schwab', symbol: 'AAPL', name: 'APPLE INC' })).toBe('');
+    expect(inferInstrumentType({ broker: 'schwab', symbol: 'AAPL 11/20/2026 200 C', action: 'Sell to Open' })).toBe('OPTION');
+  });
   it('detects all four source layouts', () => {
     expect(detectBroker(['市場', '買賣', '代碼', '名稱', '股數', '價格', '價金', '應收付', '幣別', '交割日']).broker).toBe('fubon');
     expect(detectBroker(['成交日', '商品', '買賣', '數量', '成交價', '價金', '應付金額', '應收金額', '幣別']).broker).toBe('sinopac');
