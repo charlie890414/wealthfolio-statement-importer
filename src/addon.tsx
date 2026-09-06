@@ -214,7 +214,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   }
 
   return <div className="mx-auto max-w-7xl space-y-5 p-6">
-    <div><h1 className="text-2xl font-semibold">對帳單匯入</h1><p className="mt-1 text-muted-foreground">支援富邦複委託、永豐、Schwab 與基富通。</p></div>
+    <div><h1 className="text-2xl font-semibold">對帳單匯入</h1><p className="mt-1 text-muted-foreground">支援富邦複委託、永豐、Schwab、基富通與中信 ESPP。</p></div>
     <Card><CardContent className="space-y-4 p-5">
       <label className="block font-medium">1. 選擇 Wealthfolio 帳戶<select className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background" value={accountId} onChange={(event) => { setAccountId(event.target.value); setActivities([]); setSelectedRows(new Set()); setFileName(''); setBroker(''); setIssues([]); setImportResult(''); setDateFrom(''); setDateTo(''); invalidateValidation(); }} disabled={busy}>
         <option value="">請選擇帳戶</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}（{account.currency}）</option>)}

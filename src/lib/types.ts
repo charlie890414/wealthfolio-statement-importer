@@ -1,4 +1,4 @@
-export type BrokerKind = 'fubon' | 'sinopac' | 'schwab' | 'fundrich';
+export type BrokerKind = 'fubon' | 'sinopac' | 'schwab' | 'fundrich' | 'ctbc_espp';
 
 export const CSV_FIELDS = [
   'date',

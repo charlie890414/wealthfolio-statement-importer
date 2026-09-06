@@ -13,6 +13,8 @@ const FUBON_HEADERS = ['市場', '買賣', '代碼', '名稱', '股數', '價格
 const SINOPAC_HEADERS = ['成交日', '商品', '買賣', '數量', '成交價', '價金', '應付金額', '應收金額', '幣別'];
 const SCHWAB_HEADERS = ['Date', 'Action', 'Symbol', 'Description', 'Quantity', 'Price', 'Fees & Comm', 'Amount'];
 const FUNDRICH_HEADERS = ['基金代碼', '交易類別', '基金名稱', '交易日期', '淨值', '交易金額（含手續費）', '單位數', '總金額', '交易狀態'];
+const CTBC_ESPP_HEADERS = ['買入日期', '股數', '均價', '標的'];
+const CTBC_ESPP_FIFO_HEADERS = ['日期', '類型', '提存別', '股數', '申購金額', '標的'];
 
 const empty = (): NormalizedActivity => ({ date: '', symbol: '', instrumentType: '', quantity: '', activityType: '', unitPrice: '', currency: '', fee: '', amount: '', fxRate: '', subtype: '', comment: '', account: '' });
 const clean = (value: unknown) => String(value ?? '').trim().split(',').join('');
@@ -77,8 +79,9 @@ export function inferInstrumentType(input: {
   return '';
 }
 export function detectBroker(headers: string[]): BrokerDetection {
+  if (CTBC_ESPP_FIFO_HEADERS.every((header) => headers.includes(header))) return { broker: 'ctbc_espp', missing: [] };
   const has = (required: string[]) => required.filter((header) => !headers.includes(header));
-  const candidates: Array<[BrokerKind, string[]]> = [['fubon', FUBON_HEADERS], ['sinopac', SINOPAC_HEADERS], ['schwab', SCHWAB_HEADERS], ['fundrich', FUNDRICH_HEADERS]];
+  const candidates: Array<[BrokerKind, string[]]> = [['fubon', FUBON_HEADERS], ['sinopac', SINOPAC_HEADERS], ['schwab', SCHWAB_HEADERS], ['fundrich', FUNDRICH_HEADERS], ['ctbc_espp', CTBC_ESPP_HEADERS]];
   const exact = candidates.find(([, required]) => has(required).length === 0);
   if (exact) return { broker: exact[0], missing: [] };
   const closest = candidates.map(([broker, required]) => [broker, has(required)] as const).sort((a, b) => a[1].length - b[1].length)[0];
@@ -290,8 +293,123 @@ function fundrich(rows: Array<Record<string, string>>, issues: ConversionIssue[]
   return output.sort((a, b) => a.date.localeCompare(b.date));
 }
 
+function ctbcEsppFifo(rows: Array<Record<string, string>>, issues: ConversionIssue[]): NormalizedActivity[] {
+  type Event = { date: string; type: string; deposit: string; symbol: string; target: string; quantity: Big; amount: Big; line: number };
+  type Lot = { date: string; quantity: Big; amount: Big };
+  const groups = new Map<string, Event>();
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    try {
+      const date = isoDate(row['日期'] || '');
+      const type = row['類型']?.trim();
+      if (type !== '買入' && type !== '轉出') throw new Error(`未支援的 ESPP 類型：${type || ''}`);
+      const target = row['標的']?.trim() || '';
+      if (!target) throw new Error('缺少標的');
+      const [symbol] = target.split(/\s+/);
+      const quantity = decimal(row['股數']);
+      if (quantity.lte(0)) throw new Error('股數必須大於 0');
+      const amount = type === '買入' ? decimal(row['申購金額']) : new Big(0);
+      if (type === '買入' && amount.lte(0)) throw new Error('FIFO 買入必須提供大於 0 的實際申購金額');
+      const deposit = row['提存別']?.trim() || '';
+      if (!['公提', '自提'].includes(deposit)) throw new Error('提存別必須為公提或自提');
+      const key = JSON.stringify([date, type, symbol, deposit]);
+      const existing = groups.get(key);
+      if (existing) {
+        existing.quantity = existing.quantity.plus(quantity);
+        existing.amount = existing.amount.plus(amount);
+      } else groups.set(key, { date, type, deposit, symbol, target, quantity, amount, line: i + 2 });
+    } catch (error) { issue(issues, i + 2, error instanceof Error ? error.message : String(error)); }
+  }
+  // Incomplete source data makes all subsequent FIFO allocations unreliable.
+  if (issues.some((item) => item.severity === 'error')) return [];
+  const events = [...groups.values()].sort((a, b) => a.date.localeCompare(b.date)
+    || (a.type === b.type ? a.symbol.localeCompare(b.symbol) || a.deposit.localeCompare(b.deposit) : a.type === '買入' ? -1 : 1));
+  const pools = new Map<string, Lot[]>();
+  const output: NormalizedActivity[] = [];
+  for (const event of events) {
+    const poolKey = JSON.stringify([event.symbol, event.deposit]);
+    const pool = pools.get(poolKey) || [];
+    pools.set(poolKey, pool);
+    if (event.type === '買入') {
+      pool.push({ date: event.date, quantity: event.quantity, amount: event.amount });
+      continue;
+    }
+    const available = pool.reduce((sum, lot) => sum.plus(lot.quantity), new Big(0));
+    if (event.quantity.gt(available)) {
+      issue(issues, event.line, `${event.symbol} ${event.deposit} ${event.date} 轉出 ${event.quantity} 股，但 FIFO 僅有 ${available} 股；請提供完整買入歷史`);
+      return [];
+    }
+    let remaining = event.quantity;
+    let cost = new Big(0);
+    const allocations: string[] = [];
+    while (remaining.gt(0)) {
+      const lot = pool[0];
+      const take = lot.quantity.gt(remaining) ? remaining : lot.quantity;
+      // Allocate from remaining cost; consuming the last shares also consumes
+      // any division remainder, so cost is conserved across partial transfers.
+      const allocated = take.eq(lot.quantity) ? lot.amount : lot.amount.times(take).div(lot.quantity);
+      cost = cost.plus(allocated);
+      allocations.push(`${lot.date} ${take} 股`);
+      remaining = remaining.minus(take);
+      lot.quantity = lot.quantity.minus(take);
+      lot.amount = lot.amount.minus(allocated);
+      if (lot.quantity.eq(0)) pool.shift();
+    }
+    output.push({ ...empty(), date: event.date, symbol: event.symbol, activityType: 'BUY',
+      quantity: event.quantity.toString(), unitPrice: cost.div(event.quantity).round(8, Big.roundHalfUp).toString(),
+      amount: cost.toString(), currency: 'TWD', fee: '0',
+      comment: `CTBC ESPP | ${event.target} | ${event.deposit} FIFO 入庫買入 | ${allocations.join(' + ')}` });
+  }
+  for (const [poolKey, pool] of pools) {
+    const [symbol, deposit] = JSON.parse(poolKey) as [string, string];
+    if (!pool.length) continue;
+    const quantity = pool.reduce((sum, lot) => sum.plus(lot.quantity), new Big(0));
+    const cost = pool.reduce((sum, lot) => sum.plus(lot.amount), new Big(0));
+    issues.push({ severity: 'warning', message: `${symbol} ${deposit} 尚未入庫 ${quantity} 股，保留成本 ${cost.round(8, Big.roundHalfUp)} TWD；未產生匯入活動` });
+  }
+  const deliveries = new Map<string, NormalizedActivity>();
+  for (const activity of output) {
+    const key = JSON.stringify([activity.date, activity.symbol, activity.currency]);
+    const existing = deliveries.get(key);
+    if (existing) {
+      existing.quantity = decimal(existing.quantity).plus(decimal(activity.quantity)).toString();
+      existing.amount = decimal(existing.amount).plus(decimal(activity.amount)).toString();
+      existing.comment += ` | ${activity.comment}`;
+    } else deliveries.set(key, { ...activity });
+  }
+  return [...deliveries.values()].map((activity) => ({ ...activity,
+    unitPrice: decimal(activity.amount).div(decimal(activity.quantity)).round(8, Big.roundHalfUp).toString(),
+    amount: decimal(activity.amount).round(8, Big.roundHalfUp).toString(),
+  }));
+}
+
+function ctbcEspp(rows: Array<Record<string, string>>, issues: ConversionIssue[]): NormalizedActivity[] {
+  if (rows.some((row) => '日期' in row || '類型' in row)) return ctbcEsppFifo(rows, issues);
+  const output: NormalizedActivity[] = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i]; const line = i + 2;
+    try {
+      const date = isoDate(row['買入日期']);
+      const quantity = decimal(row['股數']);
+      const unitPrice = decimal(row['均價']);
+      const target = row['標的']?.trim() || '';
+      if (!target) throw new Error('缺少標的');
+      if (quantity.lte(0)) throw new Error('股數必須大於 0');
+      if (unitPrice.lte(0)) throw new Error('均價必須大於 0');
+      const [symbol] = target.split(/\s+/);
+      const amount = quantity.times(unitPrice);
+      output.push({
+        ...empty(), date, symbol, quantity: quantity.toString(), activityType: 'BUY',
+        unitPrice: unitPrice.toString(), currency: 'TWD', fee: '', amount: amount.toString(),
+        comment: `CTBC ESPP | ${target}`,
+      });
+    } catch (error) { issue(issues, line, error instanceof Error ? error.message : String(error)); }
+  }
+  return output;
+}
+
 export function convert(broker: BrokerKind, rows: Array<Record<string, string>>): ConversionResult {
   const issues: ConversionIssue[] = []; let activities: NormalizedActivity[];
-  if (broker === 'fubon') activities = fubon(rows, issues); else if (broker === 'sinopac') activities = sinopac(rows, issues); else if (broker === 'schwab') activities = schwab(rows, issues); else activities = fundrich(rows, issues);
+  if (broker === 'fubon') activities = fubon(rows, issues); else if (broker === 'sinopac') activities = sinopac(rows, issues); else if (broker === 'schwab') activities = schwab(rows, issues); else if (broker === 'fundrich') activities = fundrich(rows, issues); else activities = ctbcEspp(rows, issues);
   return { broker, sourceRows: rows.length, activities: validateNormalizedActivities(activities.map(reconcileTradePrice), issues), issues };
 }

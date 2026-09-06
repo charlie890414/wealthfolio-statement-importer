@@ -163,6 +163,7 @@ describe('broker converters', () => {
     expect(detectBroker(['成交日', '商品', '買賣', '數量', '成交價', '價金', '應付金額', '應收金額', '幣別']).broker).toBe('sinopac');
     expect(detectBroker(['Date', 'Action', 'Symbol', 'Description', 'Quantity', 'Price', 'Fees & Comm', 'Amount']).broker).toBe('schwab');
     expect(detectBroker(['基金代碼', '交易類別', '基金名稱', '交易日期', '淨值', '交易金額（含手續費）', '單位數', '總金額', '交易狀態']).broker).toBe('fundrich');
+    expect(detectBroker(['買入日期', '股數', '均價', '標的']).broker).toBe('ctbc_espp');
   });
 
   it('reports impossible calendar dates with the source line', () => {
@@ -317,6 +318,32 @@ describe('broker converters', () => {
     const result = convert('fundrich', [{ 基金代碼: 'ALI064', 交易類別: '定期定額', 基金名稱: '基金', 交易日期: '2026-07-27', '淨值（幣別）': 'TWD', 淨值: '23.14', '交易金額（含手續費）': '3000', 單位數: '129.6', 總金額: '3000', 交易狀態: '交易成功' }, { 基金代碼: 'BAD', 交易類別: '申購', 基金名稱: '失敗', 交易日期: '2026-07-27', '淨值（幣別）': 'TWD', 淨值: '1', 單位數: '1', 總金額: '1', 交易狀態: '交易失敗' }]);
     expect(result.issues).toHaveLength(0);
     expect(result.activities.map((row) => row.activityType)).toEqual(['BUY']);
+  });
+
+  it('converts CTBC ESPP purchases for importing into a selected brokerage account', () => {
+    const result = convert('ctbc_espp', [
+      { 買入日期: '2026/09/01', 股數: '7', 均價: '2404.3453', 標的: '2330 台積電' },
+      { 買入日期: '2026/08/03', 股數: '7', 均價: '2365.0900', 標的: '2330 台積電' },
+    ]);
+
+    expect(result.issues).toHaveLength(0);
+    expect(result.activities).toEqual([
+      expect.objectContaining({ date: '2026-09-01', symbol: '2330', activityType: 'BUY', quantity: '7', unitPrice: '2404.3453', currency: 'TWD', amount: '16830.4171', comment: 'CTBC ESPP | 2330 台積電' }),
+      expect.objectContaining({ date: '2026-08-03', symbol: '2330', activityType: 'BUY', quantity: '7', unitPrice: '2365.09', currency: 'TWD', amount: '16555.63' }),
+    ]);
+  });
+
+  it('rejects invalid CTBC ESPP purchase rows with source lines', () => {
+    const result = convert('ctbc_espp', [
+      { 買入日期: '2026/09/01', 股數: '0', 均價: '2400', 標的: '2330 台積電' },
+      { 買入日期: '2026/09/02', 股數: '1', 均價: '2400', 標的: '' },
+    ]);
+
+    expect(result.activities).toHaveLength(0);
+    expect(result.issues).toEqual([
+      expect.objectContaining({ lineNumber: 2, message: '股數必須大於 0' }),
+      expect.objectContaining({ lineNumber: 3, message: '缺少標的' }),
+    ]);
   });
 
   it('uses Fundrich net settlement amounts and fees for conversions', () => {
