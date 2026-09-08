@@ -13,6 +13,10 @@ export interface ImportRowWithLine {
 
 export type CheckedActivity = ActivityImport & { source: NormalizedActivity };
 
+function nullableDecimal(value: string | null | undefined): string | null {
+  return value == null || value.trim() === '' ? null : value;
+}
+
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** Inclusive date-only filter with optional lower and upper bounds. */
@@ -74,11 +78,11 @@ export function activityFromSource(
     activityType: source.activityType as ActivityImport['activityType'],
     date: timezone ? dateAtLocalMidnight(source.date, timezone) : source.date,
     symbol: source.symbol,
-    amount: source.amount || null,
-    quantity: source.quantity || null,
-    unitPrice: source.unitPrice || null,
-    fee: source.fee || null,
-    fxRate: source.fxRate || null,
+    amount: nullableDecimal(source.amount),
+    quantity: nullableDecimal(source.quantity),
+    unitPrice: nullableDecimal(source.unitPrice),
+    fee: nullableDecimal(source.fee),
+    fxRate: nullableDecimal(source.fxRate),
     subtype: source.subtype || undefined,
     instrumentType: source.instrumentType || undefined,
     exchangeMic: source.exchangeMic,
@@ -122,7 +126,10 @@ export function mergeCheckedActivity(activity: ActivityImport, submitted: Activi
     currency: submitted.currency,
     fee: submitted.fee,
     tax: submitted.tax,
-    amount: submitted.amount,
+    // A 3.8 check response may omit an amount while validating a row. Keep
+    // the broker's explicit final settlement instead of turning it into a
+    // missing value at the merge boundary.
+    amount: submitted.amount ?? activity.amount,
     fxRate: submitted.fxRate,
     subtype: submitted.subtype,
     comment: submitted.comment,

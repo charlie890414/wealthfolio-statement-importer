@@ -6,7 +6,6 @@ import type {
   NormalizedActivity,
 } from './types';
 import Big from 'big.js';
-import { moneyDecimalPlaces } from './money';
 import { assertValidCalendarDate, validateNormalizedActivities } from './validation';
 
 const FUBON_HEADERS = ['市場', '買賣', '代碼', '名稱', '股數', '價格', '價金', '應收付', '幣別', '交割日'];
@@ -33,23 +32,6 @@ const absoluteMoney = (value: unknown) => {
 const asFloat = (value: unknown) => Number(number(value) || 0);
 const decimal = (value: unknown) => new Big(number(value) || 0);
 const decimalString = (value: Big) => value.toString();
-const reconcileTradePrice = (activity: NormalizedActivity): NormalizedActivity => {
-  if (!['BUY', 'SELL'].includes(activity.activityType) || !activity.quantity || !activity.unitPrice || !activity.amount) return activity;
-  const quantity = decimal(activity.quantity).abs();
-  const settlement = decimal(activity.amount).abs();
-  if (quantity.eq(0) || settlement.eq(0)) return activity;
-
-  const fee = decimal(activity.fee).abs();
-  const multiplier = activity.instrumentType === 'OPTION' ? new Big(100) : new Big(1);
-  const gross = quantity.times(decimal(activity.unitPrice).abs()).times(multiplier);
-  const calculatedSettlement = activity.activityType === 'BUY' ? gross.plus(fee) : gross.minus(fee);
-  const decimalPlaces = moneyDecimalPlaces(activity.currency);
-  if (calculatedSettlement.round(decimalPlaces, Big.roundHalfUp).eq(settlement.round(decimalPlaces, Big.roundHalfUp))) return activity;
-
-  const correctedGross = activity.activityType === 'BUY' ? settlement.minus(fee) : settlement.plus(fee);
-  if (correctedGross.lte(0)) return activity;
-  return { ...activity, unitPrice: correctedGross.div(quantity.times(multiplier)).round(8, Big.roundHalfUp).toString() };
-};
 const isoDate = (value: string, formats: string[] = ['YYYY-MM-DD']) => {
   const s = value.trim();
   if (/^\d{4}[-/]\d{2}[-/]\d{2}$/.test(s)) return assertValidCalendarDate(s.split('/').join('-'));
@@ -411,5 +393,9 @@ function ctbcEspp(rows: Array<Record<string, string>>, issues: ConversionIssue[]
 export function convert(broker: BrokerKind, rows: Array<Record<string, string>>): ConversionResult {
   const issues: ConversionIssue[] = []; let activities: NormalizedActivity[];
   if (broker === 'fubon') activities = fubon(rows, issues); else if (broker === 'sinopac') activities = sinopac(rows, issues); else if (broker === 'schwab') activities = schwab(rows, issues); else if (broker === 'fundrich') activities = fundrich(rows, issues); else activities = ctbcEspp(rows, issues);
-  return { broker, sourceRows: rows.length, activities: validateNormalizedActivities(activities.map(reconcileTradePrice), issues), issues };
+  // Wealthfolio 3.8 treats an explicit amount as the final cash paid or
+  // received. Preserve broker unit prices and totals so the host can validate
+  // or derive only when amount is genuinely missing; do not rewrite prices to
+  // make a legitimate settlement total fit quantity × price.
+  return { broker, sourceRows: rows.length, activities: validateNormalizedActivities(activities, issues), issues };
 }

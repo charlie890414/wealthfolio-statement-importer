@@ -1,12 +1,12 @@
 {
   "id": "wealthfolio-statement-importer",
   "name": "對帳單匯入",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "將富邦、永豐、Schwab 與基富通 CSV 對帳單轉換並匯入 Wealthfolio",
   "author": "charlie890414",
   "main": "dist/addon.js",
-  "sdkVersion": "3.7.0",
-  "minWealthfolioVersion": "3.7.0",
+  "sdkVersion": "3.8.0",
+  "minWealthfolioVersion": "3.8.0",
   "enabled": true,
   "contributes": {
     "routes": [{ "id": "wealthfolio-statement-importer" }],
@@ -24,8 +24,8 @@
   },
   "hostDependencies": {
     "@tanstack/react-query": "^5.90.0",
-    "@wealthfolio/addon-sdk": "^3.7.0",
-    "@wealthfolio/ui": "^3.7.0",
+    "@wealthfolio/addon-sdk": "^3.8.0",
+    "@wealthfolio/ui": "^3.8.0",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.561.0",
     "react": "^19.2.0",

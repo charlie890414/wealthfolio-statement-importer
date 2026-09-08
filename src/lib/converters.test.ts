@@ -56,6 +56,16 @@ describe('activity import validation batching', () => {
     expect(imported.date).toBe('2026-07-28T16:00:00.000Z');
   });
 
+  it('preserves explicit zero fields and source amount when host validation omits it', () => {
+    const source = {
+      date: '2026-07-29', symbol: 'TEST', instrumentType: '', quantity: '0', activityType: 'BUY',
+      unitPrice: '0', currency: 'TWD', fee: '0', amount: '0', fxRate: '', subtype: '', comment: '', account: '',
+    };
+    const imported = activityFromSource(source, 2, 'account');
+    expect(imported).toMatchObject({ quantity: '0', unitPrice: '0', fee: '0', amount: '0' });
+    expect(mergeCheckedActivity(imported, { ...imported, amount: null })).toMatchObject({ amount: '0' });
+  });
+
   it('keeps row selection separate from validation input', () => {
     const rows = [activity(1), activity(2), activity(3)];
     const selected = new Set([1, 3]);
@@ -220,7 +230,7 @@ describe('broker converters', () => {
     expect(twdRounded.unitPrice).toBe('10.4');
   });
 
-  it('corrects buy and sell prices from settlement amounts without counting fees twice', () => {
+  it('preserves broker execution prices when settlement amount is explicit', () => {
     const buy = convert('fubon', [
       { 市場: 'GB', 買賣: 'B', 代碼: 'FWRA.LSE1', 名稱: 'ETF', 股數: '2', 價格: '9', 價金: '18', 手續費: '1', 處理費: '0', 交易費: '0', 結算費: '0', 交易稅: '0', 印花稅: '0', 應收付: '-20', 幣別: 'USD', 交割日: '20260720' },
     ]).activities[0];
@@ -228,11 +238,11 @@ describe('broker converters', () => {
       { 成交日: '2026/08/18', 商品: '009826 貝萊德', 買賣: '現賣', 數量: '10', 成交價: '10', 價金: '100', 手續費: '1', 交易稅: '0', 應付金額: '0', 應收金額: '98', 幣別: 'TWD' },
     ]).activities[0];
 
-    expect(buy.unitPrice).toBe('9.5');
-    expect(sell.unitPrice).toBe('9.9');
+    expect(buy.unitPrice).toBe('9');
+    expect(sell.unitPrice).toBe('10');
   });
 
-  it('normalizes Schwab cash directions and derives reinvestment price from settlement amount', () => {
+  it('normalizes Schwab cash directions and preserves the broker reinvestment price', () => {
     const result = convert('schwab', [
       { Date: '03/29/2022', Action: 'Reinvest Shares', Symbol: 'VOO', Description: 'Bought fractional shares', Quantity: '0.002', Price: '$421.7638', 'Fees & Comm': '', Amount: '-$0.96' },
       { Date: '03/29/2022', Action: 'NRA Tax Adj', Symbol: 'VOO', Description: 'Tax', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '-$0.41' },
@@ -249,7 +259,7 @@ describe('broker converters', () => {
       { activityType: 'WITHDRAWAL', amount: '13295.79' },
       { activityType: 'WITHDRAWAL', amount: '9' },
     ]);
-    expect(result.activities[0].unitPrice).toBe('480');
+    expect(result.activities[0].unitPrice).toBe('421.7638');
   });
 
   it('excludes matched TDA to Schwab migration legs', () => {
@@ -355,7 +365,7 @@ describe('broker converters', () => {
     expect(result.issues).toHaveLength(0);
     expect(result.activities.map(({ activityType, unitPrice, amount, fee }) => ({ activityType, unitPrice, amount, fee }))).toEqual([
       { activityType: 'SELL', unitPrice: '10.43', amount: '40347', fee: '234' },
-      { activityType: 'BUY', unitPrice: '11.95968078', amount: '40347', fee: '184' },
+      { activityType: 'BUY', unitPrice: '11.96', amount: '40347', fee: '184' },
     ]);
   });
 
@@ -394,7 +404,7 @@ describe('economic duplicate matching', () => {
     expect(result[0].duplicateOfId).toBe('old');
   });
 
-  it('matches a Sinopac settled import amount to an existing gross trade amount', () => {
+  it('does not treat a pre-3.8 gross amount as the same final settlement', () => {
     const row = imported('new', 'CSV');
     row.amount = '94530';
     const result = markExistingDuplicates([row], [{
@@ -402,7 +412,7 @@ describe('economic duplicate matching', () => {
       assetSymbol: '0050', quantity: 1000, unitPrice: 94.5, fee: 30,
       amount: 94500, currency: 'TWD',
     }], 'account');
-    expect(result[0].duplicateOfId).toBe('old');
+    expect(result[0].duplicateOfId).toBeUndefined();
   });
 
   it('does not match trades whose settlement amounts agree but execution prices differ', () => {
@@ -516,6 +526,20 @@ describe('economic duplicate matching', () => {
     const row = imported('new', 'CSV');
     row.quantity = '999';
     const result = markExistingDuplicates([row], [{ id: 'old', accountId: 'account', activityType: 'BUY', date: '2026-07-29', assetSymbol: '0050', quantity: 1000, unitPrice: 94.5, fee: 30, amount: 94530, currency: 'TWD' }], 'account');
+    expect(result[0].duplicateOfId).toBeUndefined();
+  });
+
+  it('keeps an explicit zero cash amount distinct from a missing amount', () => {
+    const row = imported('new', 'cash');
+    row.activityType = 'DEPOSIT';
+    row.quantity = null;
+    row.unitPrice = null;
+    row.amount = '0';
+    const result = markExistingDuplicates([row], [{
+      id: 'old', accountId: 'account', activityType: 'DEPOSIT', date: '2026-07-29',
+      quantity: null, unitPrice: null, amount: null, currency: 'TWD',
+    }], 'account');
+
     expect(result[0].duplicateOfId).toBeUndefined();
   });
 

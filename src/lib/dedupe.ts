@@ -51,6 +51,7 @@ const decimal = (value: unknown) => {
   try { return new Big(s).abs().toString(); } catch { return s; }
 };
 const field = (value: unknown) => decimal(value) || '';
+const hasExplicitAmount = (activity: ActivityImport | ExistingActivityForDedupe) => field(activity.amount) !== '';
 const zeroField = (value: unknown) => field(value) || '0';
 const normalizedSubtype = (value: unknown) => {
   const subtype = text(value).toUpperCase();
@@ -93,6 +94,28 @@ const assetKeys = (activity: ActivityImport | ExistingActivityForDedupe) => {
   return [...new Set(values.length ? values : [''])];
 };
 const sameValues = (left: unknown, right: unknown) => field(left) === field(right);
+const sameAuthoritativeEconomics = (
+  imported: ActivityImport,
+  existing: ExistingActivityForDedupe,
+  currency: string,
+) => {
+  if (!hasExplicitAmount(imported) || !hasExplicitAmount(existing)) return true;
+  const sameFinalAmount = roundedMoney(new Big(field(imported.amount)), currency)
+    === roundedMoney(new Big(field(existing.amount)), currency);
+  // Host quote resolution may change insignificant display precision, but a
+  // materially different execution price must not be hidden by an equal final
+  // cash amount.
+  const normalizedPrice = (value: unknown) => new Big(field(value) || 0).round(2, Big.roundHalfUp).toFixed(2);
+  if (normalizedPrice(imported.unitPrice) !== normalizedPrice(existing.unitPrice)) return false;
+  if (sameFinalAmount) return true;
+  // A migrated legacy row can retain a fractional pre-rounding amount while
+  // the broker import carries the rounded settlement. Allow only one minor
+  // unit of this compatibility drift; larger final-amount differences are
+  // distinct transactions under the 3.8 contract.
+  const difference = Math.abs(Number(field(imported.amount)) - Number(field(existing.amount)));
+  const minorUnit = ZERO_DECIMAL_CURRENCIES.has(currency) ? 1 : 0.01;
+  return difference <= minorUnit;
+};
 const optionMultiplier = (activity: ActivityImport | ExistingActivityForDedupe) => {
   const subtype = normalizedSubtype(activity.subtype);
   const symbols = assetKeys(activity);
@@ -141,6 +164,14 @@ const tradeSettlementKeys = (
   const quantity = field(activity.quantity);
   const unitPrice = field(activity.unitPrice);
   const explicit = field(activity.amount);
+  if (explicit) {
+    // Wealthfolio 3.8 defines amount as final cash. Include the execution
+    // price in this key so two same-day fills with the same settlement but
+    // different economics are not collapsed into one duplicate. The plain
+    // settlement candidate below remains for legacy rows whose stored amount
+    // was gross and must be compared through quantity × price + charges.
+    candidates.push(`final:${roundedMoney(new Big(explicit), currency)}:${unitPrice}`);
+  }
   // When quantity and execution price are both available, they are the
   // authoritative trade identity. Using amount as an independent candidate
   // would mark a corrected import as duplicate of an older row whose price was
@@ -179,7 +210,10 @@ function keys(
     currency,
   ];
   if (isCash) {
-    const base = [...common, zeroField(activity.amount), zeroField(activity.fee), zeroField((activity as ExistingActivityForDedupe).tax)];
+    // Keep a missing amount distinct from an explicit zero. Wealthfolio 3.8
+    // treats these differently during review and migration.
+    const amountField = hasExplicitAmount(activity) ? field(activity.amount) : 'MISSING';
+    const base = [...common, amountField, zeroField(activity.fee), zeroField((activity as ExistingActivityForDedupe).tax)];
     const result = [base.join('|')];
     // Keep a more specific key as a secondary candidate when the broker
     // provides a ticker. The amount-only key remains the fallback for older
@@ -205,6 +239,7 @@ export function markExistingDuplicates(
   timezone?: string,
 ): ActivityImport[] {
   const queues = new Map<string, string[]>();
+  const existingById = new Map(existing.map((item) => [item.id, item]));
   for (const item of existing) {
     for (const itemKey of keys(item, text(item.accountId) || accountId, 'existing', timezone)) {
       const queue = queues.get(itemKey) ?? [];
@@ -218,7 +253,11 @@ export function markExistingDuplicates(
     let id: string | undefined;
     for (const activityKey of keys(activity, accountId, 'import', timezone)) {
       const queue = queues.get(activityKey);
-      id = queue?.find((candidate) => !consumed.has(candidate));
+      id = queue?.find((candidate) => {
+        if (consumed.has(candidate)) return false;
+        const existingItem = existingById.get(candidate);
+        return !existingItem || sameAuthoritativeEconomics(activity, existingItem, text(activity.currency).toUpperCase());
+      });
       if (id) break;
     }
     if (!id) return activity;
@@ -245,6 +284,7 @@ export function markExistingDuplicates(
   };
   const aggregate = (items: Array<ActivityImport | ExistingActivityForDedupe>) => {
     let quantity = new Big(0);
+    let notional = new Big(0);
     let settlement = new Big(0);
     let cost = new Big(0);
     for (const item of items) {
@@ -252,14 +292,18 @@ export function markExistingDuplicates(
       const itemCost = totalCost(item);
       const itemType = text(item.activityType).toUpperCase();
       const unitPrice = field(item.unitPrice);
-      const gross = unitPrice
-        ? itemQuantity.times(unitPrice).times(optionMultiplier(item))
-        : new Big(field(item.amount) || 0);
+      const explicitAmount = field(item.amount);
+      const itemSettlement = explicitAmount
+        ? new Big(explicitAmount).abs()
+        : unitPrice
+          ? settlementAmount(itemType, itemQuantity.times(unitPrice).times(optionMultiplier(item)), itemCost)
+          : new Big(0);
       quantity = quantity.plus(itemQuantity);
+      if (unitPrice) notional = notional.plus(itemQuantity.times(unitPrice).times(optionMultiplier(item)));
       cost = cost.plus(itemCost);
-      settlement = settlement.plus(settlementAmount(itemType, gross, itemCost));
+      settlement = settlement.plus(itemSettlement);
     }
-    return { quantity, settlement, cost };
+    return { quantity, notional, settlement, cost };
   };
   const importGroups = new Map<string, number[]>();
   matched.forEach((activity, index) => {
@@ -283,6 +327,7 @@ export function markExistingDuplicates(
     const currency = text(matched[indexes[0]].currency).toUpperCase();
     if (
       importedTotal.quantity.round(8).eq(existingTotal.quantity.round(8)) &&
+      importedTotal.notional.round(8).eq(existingTotal.notional.round(8)) &&
       roundedMoney(importedTotal.settlement, currency) === roundedMoney(existingTotal.settlement, currency) &&
       roundedMoney(importedTotal.cost, currency) === roundedMoney(existingTotal.cost, currency)
     ) {
