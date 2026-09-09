@@ -4,7 +4,7 @@ import type { NormalizedActivity } from './types';
 
 const row = (symbol: string, currency = 'USD'): NormalizedActivity => ({
   date: '2026-09-04', symbol, instrumentType: 'EQUITY', quantity: '1', activityType: 'BUY',
-  unitPrice: '1', currency, fee: '0', amount: '1', fxRate: '', subtype: '', comment: '', account: '',
+  unitPrice: '1', currency, fee: '0', tax: '0', amount: '1', fxRate: '', subtype: '', comment: '', account: '',
 });
 
 describe('market asset type resolution', () => {

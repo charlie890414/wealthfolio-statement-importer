@@ -28,7 +28,7 @@ export function assertValidCalendarDate(value: string): string {
 const decimalText = z.string().refine((value) => value === '' || /^-?(?:\d+\.?\d*|\.\d+)$/.test(value), '必須是有效數字');
 const normalizedActivitySchema = z.object({
   date: z.string().refine(isCalendarDate, '必須是有效日期'), symbol: z.string(), instrumentType: z.string(), quantity: decimalText,
-  activityType: z.enum(activityTypes), unitPrice: decimalText, currency: z.string().min(1), fee: decimalText, amount: decimalText,
+  activityType: z.enum(activityTypes), unitPrice: decimalText, currency: z.string().min(1), fee: decimalText, tax: decimalText, amount: decimalText,
   fxRate: decimalText, subtype: z.string(), comment: z.string(), account: z.string(),
 }).passthrough();
 

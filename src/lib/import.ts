@@ -82,6 +82,7 @@ export function activityFromSource(
     quantity: nullableDecimal(source.quantity),
     unitPrice: nullableDecimal(source.unitPrice),
     fee: nullableDecimal(source.fee),
+    tax: nullableDecimal(source.tax),
     fxRate: nullableDecimal(source.fxRate),
     subtype: source.subtype || undefined,
     instrumentType: source.instrumentType || undefined,

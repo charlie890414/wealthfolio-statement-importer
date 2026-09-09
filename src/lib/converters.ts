@@ -15,7 +15,7 @@ const FUNDRICH_HEADERS = ['基金代碼', '交易類別', '基金名稱', '交�
 const CTBC_ESPP_HEADERS = ['買入日期', '股數', '均價', '標的'];
 const CTBC_ESPP_FIFO_HEADERS = ['日期', '類型', '提存別', '股數', '申購金額', '標的'];
 
-const empty = (): NormalizedActivity => ({ date: '', symbol: '', instrumentType: '', quantity: '', activityType: '', unitPrice: '', currency: '', fee: '', amount: '', fxRate: '', subtype: '', comment: '', account: '' });
+const empty = (): NormalizedActivity => ({ date: '', symbol: '', instrumentType: '', quantity: '', activityType: '', unitPrice: '', currency: '', fee: '', tax: '', amount: '', fxRate: '', subtype: '', comment: '', account: '' });
 const clean = (value: unknown) => String(value ?? '').trim().split(',').join('');
 const number = (value: unknown) => {
   let s = clean(value).replace(/[$£€]/g, '');
@@ -82,9 +82,10 @@ function fubon(rows: Array<Record<string, string>>, issues: ConversionIssue[]): 
       if (market === 'TW' && isTaiwanWarrantCode(code)) { issue(issues, line, `已排除代號可能重複使用的台股權證：${code}`, 'warning'); continue; }
       const suffix: Record<string, string> = { GB: 'L', TW: 'TW', HK: 'HK', JP: 'T', DE: 'DE', FR: 'PA', NL: 'AS', CH: 'SW', CA: 'TO', AU: 'AX' };
       const base = code.split(/[.\s]/)[0]; const symbol = suffix[market] ? `${base}.${suffix[market]}` : base;
-      const fee = ['手續費', '處理費', '交易費', '結算費', '交易稅', '印花稅'].reduce((sum, key) => sum.plus(decimal(row[key])), new Big(0));
+      const fee = ['手續費', '處理費', '交易費', '結算費'].reduce((sum, key) => sum.plus(decimal(row[key])), new Big(0));
+      const tax = ['交易稅', '印花稅'].reduce((sum, key) => sum.plus(decimal(row[key])), new Big(0));
       const currency = row['幣別']?.trim() || 'USD';
-      const trade: NormalizedActivity = { ...empty(), date, symbol, instrumentType: inferInstrumentType({ broker: 'fubon', symbol: code, name: row['名稱'], market }), quantity: money(row['股數']), activityType: side === 'B' ? 'BUY' : 'SELL', unitPrice: money(row['價格']), currency, fee: decimalString(fee), amount: absoluteMoney(row['應收付']), comment: `${code} | ${row['名稱']?.trim() || ''} | 市場:${market} 交割日:${settle}（CSV 日期）`, };
+      const trade: NormalizedActivity = { ...empty(), date, symbol, instrumentType: inferInstrumentType({ broker: 'fubon', symbol: code, name: row['名稱'], market }), quantity: money(row['股數']), activityType: side === 'B' ? 'BUY' : 'SELL', unitPrice: money(row['價格']), currency, fee: decimalString(fee), tax: decimalString(tax), amount: absoluteMoney(row['應收付']), comment: `${code} | ${row['名稱']?.trim() || ''} | 市場:${market} 交割日:${settle}（CSV 日期）`, };
       output.push(trade);
     } catch (error) { issue(issues, line, error instanceof Error ? error.message : String(error)); }
   }
@@ -100,12 +101,12 @@ function sinopac(rows: Array<Record<string, string>>, issues: ConversionIssue[])
       for (const key of ['融資金額', '保證金', '利息', '融券手續費']) if (asFloat(row[key])) throw new Error('不支援融資、融券或其他非現金交易');
       const date = isoDate(row['成交日']); const [code, ...nameParts] = (row['商品'] || '').trim().split(/\s+/); const name = nameParts.join(' '); const currency = row['幣別']?.trim() || 'TWD';
       if (isTaiwanWarrantCode(code)) { issue(issues, line, `已排除代號可能重複使用的台股權證：${code}`, 'warning'); continue; }
-      const type = side === '現買' ? 'BUY' : 'SELL'; const fee = decimal(row['手續費']).plus(decimal(row['交易稅']));
+      const type = side === '現買' ? 'BUY' : 'SELL'; const fee = decimal(row['手續費']); const tax = decimal(row['交易稅']);
       // Sinopac reports the settled cash total in separate buy/sell columns.
       // Keep that economic amount on the activity so preview, native checking,
       // and addon duplicate matching all see the same transaction value.
       const amount = side === '現買' ? money(row['應付金額']) : money(row['應收金額']);
-      const trade: NormalizedActivity = { ...empty(), date, symbol: code, instrumentType: inferInstrumentType({ broker: 'sinopac', symbol: code, name }), quantity: money(row['數量']), activityType: type, unitPrice: money(row['成交價']), currency, fee: decimalString(fee), amount, comment: `${code} ${name}`.trim() };
+      const trade: NormalizedActivity = { ...empty(), date, symbol: code, instrumentType: inferInstrumentType({ broker: 'sinopac', symbol: code, name }), quantity: money(row['數量']), activityType: type, unitPrice: money(row['成交價']), currency, fee: decimalString(fee), tax: decimalString(tax), amount, comment: `${code} ${name}`.trim() };
       output.push(trade);
     } catch (error) { issue(issues, line, error instanceof Error ? error.message : String(error)); }
   }
@@ -145,6 +146,7 @@ function mergeSchwabSameAmountTrades(rows: NormalizedActivity[]): NormalizedActi
     base.quantity = quantity.toString();
     base.unitPrice = quantity.eq(0) ? base.unitPrice : notional.div(quantity).toString();
     base.fee = decimal(base.fee).plus(decimal(row.fee)).toString();
+    base.tax = decimal(base.tax).plus(decimal(row.tax)).toString();
     base.amount = decimal(base.amount).plus(decimal(row.amount)).toString();
     const mergedCount = Number(base.comment.match(/merged (\d+) same-day same-amount fills/)?.[1] || 1) + 1;
     base.comment = `${base.comment.replace(/ \| merged \d+ same-day same-amount fills$/, '')} | merged ${mergedCount} same-day same-amount fills`.trim();

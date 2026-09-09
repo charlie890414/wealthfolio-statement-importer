@@ -9,6 +9,7 @@ export const CSV_FIELDS = [
   'unitPrice',
   'currency',
   'fee',
+  'tax',
   'amount',
   'fxRate',
   'subtype',
@@ -27,6 +28,7 @@ export interface NormalizedActivity {
   unitPrice: string;
   currency: string;
   fee: string;
+  tax: string;
   amount: string;
   fxRate: string;
   subtype: string;

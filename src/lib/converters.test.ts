@@ -41,10 +41,10 @@ describe('activity import validation batching', () => {
 
     const merged = checked.map((row, index) => mergeCheckedActivity(row, rows[index]));
 
-    expect(merged.map(({ quantity, unitPrice, fee, amount }) => ({ quantity, unitPrice, fee, amount }))).toEqual([
-      { quantity: '4000', unitPrice: '10.2', fee: '13', amount: '40813' },
-      { quantity: '1000', unitPrice: '10.18', fee: '3', amount: '10183' },
-      { quantity: '10000', unitPrice: '10.28', fee: '33', amount: '102833' },
+    expect(merged.map(({ quantity, unitPrice, fee, tax, amount }) => ({ quantity, unitPrice, fee, tax, amount }))).toEqual([
+      { quantity: '4000', unitPrice: '10.2', fee: '13', tax: '0', amount: '40813' },
+      { quantity: '1000', unitPrice: '10.18', fee: '3', tax: '0', amount: '10183' },
+      { quantity: '10000', unitPrice: '10.28', fee: '33', tax: '0', amount: '102833' },
     ]);
     expect(merged.every((row) => row.assetId === 'asset-009826' && row.exchangeMic === 'XTAI')).toBe(true);
   });
@@ -59,7 +59,7 @@ describe('activity import validation batching', () => {
   it('preserves explicit zero fields and source amount when host validation omits it', () => {
     const source = {
       date: '2026-07-29', symbol: 'TEST', instrumentType: '', quantity: '0', activityType: 'BUY',
-      unitPrice: '0', currency: 'TWD', fee: '0', amount: '0', fxRate: '', subtype: '', comment: '', account: '',
+      unitPrice: '0', currency: 'TWD', fee: '0', tax: '0', amount: '0', fxRate: '', subtype: '', comment: '', account: '',
     };
     const imported = activityFromSource(source, 2, 'account');
     expect(imported).toMatchObject({ quantity: '0', unitPrice: '0', fee: '0', amount: '0' });
@@ -188,6 +188,13 @@ describe('broker converters', () => {
     expect(result.activities.map((row) => row.activityType)).toEqual(['BUY']);
     expect(result.activities[0].symbol).toBe('FWRA.L');
     expect(result.activities[0].date).toBe('2026-07-20');
+    expect(result.activities[0]).toMatchObject({ fee: '1.38', tax: '0' });
+  });
+
+  it('maps Sinopac 手續費 and 交易稅 to fee and tax separately', () => {
+    const result = convert('sinopac', [{ 成交日: '2026/08/18', 商品: '009826 貝萊德', 買賣: '現買', 數量: '1', 成交價: '100', 價金: '100', 手續費: '1', 交易稅: '2', 應付金額: '103', 應收金額: '0', 幣別: 'TWD' }]);
+    expect(result.issues).toHaveLength(0);
+    expect(result.activities[0]).toMatchObject({ fee: '1', tax: '2', amount: '103' });
   });
 
   it('rejects Sinopac margin rows and emits sell withdrawal', () => {
@@ -570,7 +577,7 @@ describe('economic duplicate matching', () => {
 });
 
 it('serializes the standard Wealthfolio columns', () => {
-  const csv = stringifyActivities([{ date: '2026-01-01', symbol: 'AAPL', instrumentType: 'EQUITY', quantity: '1', activityType: 'BUY', unitPrice: '10', currency: 'USD', fee: '0', amount: '', fxRate: '', subtype: '', comment: 'a,b', account: 'Broker' }]);
-  expect(csv.split('\r\n')[0]).toBe('date,symbol,instrumentType,quantity,activityType,unitPrice,currency,fee,amount,fxRate,subtype,comment,account');
+  const csv = stringifyActivities([{ date: '2026-01-01', symbol: 'AAPL', instrumentType: 'EQUITY', quantity: '1', activityType: 'BUY', unitPrice: '10', currency: 'USD', fee: '0', tax: '0', amount: '', fxRate: '', subtype: '', comment: 'a,b', account: 'Broker' }]);
+  expect(csv.split('\r\n')[0]).toBe('date,symbol,instrumentType,quantity,activityType,unitPrice,currency,fee,tax,amount,fxRate,subtype,comment,account');
   expect(csv).toContain('"a,b"');
 });
