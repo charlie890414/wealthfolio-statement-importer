@@ -79,5 +79,6 @@ jobs:
           zip_file="$(find dist -maxdepth 1 -type f -name '*.zip' -print -quit)"
           test -n "$zip_file"
           gh release create "$GITHUB_REF_NAME" "$zip_file" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
