@@ -1,3 +1,9 @@
+## 1.1.1
+
+- CSV 無法轉出活動時仍顯示逐列錯誤，避免只顯示「CSV 沒有可匯入的活動」。
+- 加入完整 34 筆中信 ESPP 範例驗證，包含 2026 年 10 月及尾端空白列。
+- 頁面顯示版本，方便確認已載入更新的套件。
+
 # Changelog
 
 All notable changes to the wealthfolioAddon addon will be documented in this file.

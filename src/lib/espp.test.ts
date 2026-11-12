@@ -15,6 +15,8 @@ describe('ESPP purchase-date buys', () => {
 
   it('converts the supplied consolidated CSV using actual subscription totals', () => {
     const parsed = parseCsv(`日期,類型,提存別,股數,均價,申購金額,標的
+2026/10/01,買入,公提,1,2524.2277,2524,2330 台積電
+2026/10/01,買入,自提,5,2524.2277,12621,2330 台積電
 2026/09/01,買入,公提,1,2405.7156,2406,2330 台積電
 2026/09/01,買入,自提,6,2405.7156,14434,2330 台積電
 2026/08/03,買入,公提,1,2368.4603,2369,2330 台積電
@@ -46,10 +48,11 @@ describe('ESPP purchase-date buys', () => {
 2025/07/01,買入,公提,2,1086.6022,2173,2330 台積電
 2025/07/01,買入,自提,12,1086.6022,13039,2330 台積電
 2025/06/02,買入,公提,2,964.7167,1929,2330 台積電
-2025/06/02,買入,自提,13,964.7167,12541,2330 台積電`);
+2025/06/02,買入,自提,13,964.7167,12541,2330 台積電
+ `);
     expect(detectBroker(parsed.headers).broker).toBe('ctbc_espp');
     const result = convert('ctbc_espp', rowsAsObjects(parsed));
-    expect(result.sourceRows).toBe(32);
+    expect(result.sourceRows).toBe(34);
     expect(result.issues).toEqual([]);
     expect(result.activities.map(({ date, quantity, amount }) => [date, quantity, amount])).toEqual([
       ['2025-06-02', '15', '14470'],
@@ -68,6 +71,7 @@ describe('ESPP purchase-date buys', () => {
       ['2026-07-01', '6', '14784'],
       ['2026-08-03', '7', '16580'],
       ['2026-09-01', '7', '16840'],
+      ['2026-10-01', '6', '15145'],
     ]);
     expect(result.activities[15]).toMatchObject({ symbol: '2330', activityType: 'BUY',
       unitPrice: '2405.71428571', amount: '16840', currency: 'TWD', fee: '0' });

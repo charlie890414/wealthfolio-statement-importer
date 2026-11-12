@@ -132,6 +132,13 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
       const parsed = parseCsv(text); const detection = detectBroker(parsed.headers);
       if (!detection.broker) throw new Error(`無法辨識 CSV 格式。請確認標題列包含：${detection.missing.join('、')}`);
       const result = convert(detection.broker, rowsAsObjects(parsed));
+      setFileName(file.name); setBroker(detection.broker); setIssues(result.issues);
+      if (!result.activities.length) {
+        setMessage(result.issues.some((item) => item.severity === 'error')
+          ? 'CSV 轉換失敗，請查看下方各列的錯誤原因。'
+          : `已讀取 ${result.sourceRows} 筆來源資料，但沒有可匯入的買入或其他支援活動。`);
+        return;
+      }
       let savedMapping: typeof mapping = null;
       try { savedMapping = await ctx.api.activities.getImportMapping(accountId) as typeof mapping; } catch { /* older hosts may not expose mappings */ }
       setMapping(savedMapping);
@@ -144,8 +151,6 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
         mappedRows,
         (query) => ctx.api.market.searchTicker(query) as Promise<TickerResult[]>,
       );
-      setFileName(file.name); setBroker(detection.broker); setIssues(result.issues);
-      if (!marketResolution.rows.length) throw new Error('CSV 沒有可匯入的活動');
       const preview = marketResolution.rows.map((row, index) => activityFromSource(row, index + 1, accountId));
       setActivities(preview); setSelectedRows(allImportRowNumbers(preview));
       const unresolved = marketResolution.rows.filter((row) => row.symbol && !row.instrumentType).length;
@@ -214,7 +219,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   }
 
   return <div className="mx-auto max-w-7xl space-y-5 p-6">
-    <div><h1 className="text-2xl font-semibold">對帳單匯入</h1><p className="mt-1 text-muted-foreground">支援富邦複委託、永豐、Schwab、基富通與中信 ESPP。</p></div>
+    <div><h1 className="text-2xl font-semibold">對帳單匯入 <span className="text-sm text-muted-foreground">v1.1.1</span></h1><p className="mt-1 text-muted-foreground">支援富邦複委託、永豐、Schwab、基富通與中信 ESPP。</p></div>
     <Card><CardContent className="space-y-4 p-5">
       <label className="block font-medium">1. 選擇 Wealthfolio 帳戶<select className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background" value={accountId} onChange={(event) => { setAccountId(event.target.value); setActivities([]); setSelectedRows(new Set()); setFileName(''); setBroker(''); setIssues([]); setImportResult(''); setDateFrom(''); setDateTo(''); invalidateValidation(); }} disabled={busy}>
         <option value="">請選擇帳戶</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}（{account.currency}）</option>)}
@@ -224,9 +229,9 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
       </label>
       {busy && <p className="text-sm">處理中…</p>}{message && <p className="rounded-lg border bg-muted/50 p-3 text-sm">{message}</p>}{importResult && <p className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-800">{importResult}</p>}
     </CardContent></Card>
+    {issues.length > 0 && <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800"><p className="font-medium">轉換訊息</p>{issues.map((item, index) => <p key={`${item.lineNumber}-${index}`}>{item.lineNumber ? `第 ${item.lineNumber} 列：` : ''}{item.message}</p>)}</div>}
     {activities.length > 0 && <Card><CardContent className="space-y-4 p-5">
       <div className="flex flex-wrap items-center gap-4 text-sm"><span>來源：{broker}</span><span>活動：{activities.length}</span><span>顯示：{visibleActivities.length}</span><span>已選取：{selectedCount}</span><Badge variant={validated ? (hasValidationErrors ? 'destructive' : 'default') : 'secondary'}>{validated ? (hasValidationErrors ? '有驗證錯誤' : '驗證完成') : '待驗證'}</Badge></div>
-      {issues.length > 0 && <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800"><p className="font-medium">轉換訊息</p>{issues.map((item, index) => <p key={`${item.lineNumber}-${index}`}>{item.lineNumber ? `第 ${item.lineNumber} 列：` : ''}{item.message}</p>)}</div>}
       <div className="rounded-lg border bg-muted/30 p-4">
         <div className="flex flex-wrap items-end gap-3">
           <label className="grid min-w-44 flex-1 gap-1.5 text-sm font-medium sm:max-w-52" htmlFor="date-from">
