@@ -5,8 +5,10 @@ declare module 'big.js' {
     minus(value: string | number | Big): Big;
     times(value: string | number | Big): Big;
     div(value: string | number | Big): Big;
+    mod(value: string | number | Big): Big;
     abs(): Big;
     lte(value: string | number | Big): boolean;
+    lt(value: string | number | Big): boolean;
     gt(value: string | number | Big): boolean;
     eq(value: string | number | Big): boolean;
     toString(): string;

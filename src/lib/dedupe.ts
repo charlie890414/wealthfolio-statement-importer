@@ -93,20 +93,39 @@ const assetKeys = (activity: ActivityImport | ExistingActivityForDedupe) => {
   if (description && (!values.length || subtype.startsWith('OPTION_'))) values.push(`NOTE:${description}`);
   return [...new Set(values.length ? values : [''])];
 };
+const cashSymbol = (activity: ActivityImport | ExistingActivityForDedupe) =>
+  text((activity as ActivityImport).symbol || (activity as ExistingActivityForDedupe).assetSymbol).toUpperCase();
+const cashAssetCompatible = (left: ActivityImport | ExistingActivityForDedupe, right: ExistingActivityForDedupe) => {
+  const leftAssetId = text(left.assetId);
+  const rightAssetId = text(right.assetId);
+  if (leftAssetId && rightAssetId && leftAssetId === rightAssetId) return true;
+  const leftSymbol = cashSymbol(left);
+  const rightSymbol = cashSymbol(right);
+  return !leftSymbol || !rightSymbol || leftSymbol === rightSymbol;
+};
 const sameValues = (left: unknown, right: unknown) => field(left) === field(right);
 const sameAuthoritativeEconomics = (
   imported: ActivityImport,
   existing: ExistingActivityForDedupe,
   currency: string,
 ) => {
+  if (CASH_TYPES.has(text(imported.activityType).toUpperCase()) && !cashAssetCompatible(imported, existing)) return false;
+  if (text(imported.activityType).toUpperCase() === 'SPLIT') {
+    return hasExplicitAmount(imported) && hasExplicitAmount(existing)
+      ? roundedMoney(new Big(field(imported.amount)), currency) === roundedMoney(new Big(field(existing.amount)), currency)
+      : false;
+  }
   if (!hasExplicitAmount(imported) || !hasExplicitAmount(existing)) return true;
   const sameFinalAmount = roundedMoney(new Big(field(imported.amount)), currency)
     === roundedMoney(new Big(field(existing.amount)), currency);
   // Host quote resolution may change insignificant display precision, but a
   // materially different execution price must not be hidden by an equal final
   // cash amount.
-  const normalizedPrice = (value: unknown) => new Big(field(value) || 0).round(2, Big.roundHalfUp).toFixed(2);
-  if (normalizedPrice(imported.unitPrice) !== normalizedPrice(existing.unitPrice)) return false;
+  const type = text(imported.activityType).toUpperCase();
+  if (type === 'BUY' || type === 'SELL') {
+    const normalizedPrice = (value: unknown) => new Big(field(value) || 0).round(2, Big.roundHalfUp).toFixed(2);
+    if (normalizedPrice(imported.unitPrice) !== normalizedPrice(existing.unitPrice)) return false;
+  }
   if (sameFinalAmount) return true;
   // A migrated legacy row can retain a fractional pre-rounding amount while
   // the broker import carries the rounded settlement. Allow only one minor
@@ -141,11 +160,23 @@ export function sameDayNonDuplicateReason(
   const candidates = [...existing, ...batchCandidates].filter((item) => {
     if ((text(item.accountId) || accountId) !== accountId || dateOnly(item.date, timezone) !== date) return false;
     const itemType = text(item.activityType).toUpperCase();
-    return CASH_TYPES.has(type) ? itemType === type : assetKeys(item).some((asset) => assets.has(asset));
+    return CASH_TYPES.has(type)
+      ? itemType === type && cashAssetCompatible(activity, item)
+      : assetKeys(item).some((asset) => assets.has(asset));
   });
   if (!candidates.length) return undefined;
   const item = candidates[0];
   if (text(item.activityType).toUpperCase() !== type) return `同日同標的，但買賣類型不同（${type || '—'}／${text(item.activityType).toUpperCase() || '—'}）`;
+  if (type === 'SPLIT') {
+    if (!sameValues(activity.amount, item.amount)) return `同日同標的，但拆股比例不同（${text(activity.amount) || '—'}／${text(item.amount) || '—'}）`;
+    return '同日同標的，但拆股活動內容不同';
+  }
+  if (CASH_TYPES.has(type)) {
+    if (!sameValues(activity.fee, item.fee) || !sameValues((activity as ActivityImport & { tax?: unknown }).tax, item.tax)) return '同日同標的，但費用或稅額不同';
+    if (!sameValues(activity.amount, item.amount)) return `同日同標的，但金額不同（${text(activity.amount) || '—'}／${text(item.amount) || '—'}）`;
+    if (normalizedSubtype(activity.subtype) !== normalizedSubtype(item.subtype)) return '同日同標的，但活動子類型不同';
+    return '同日同標的，但現金活動內容不同';
+  }
   if (!sameValues(activity.quantity, item.quantity)) return `同日同標的，但數量不同（${text(activity.quantity) || '—'}／${text(item.quantity) || '—'}）`;
   if (!sameValues(activity.unitPrice, item.unitPrice)) return `同日同標的，但單價不同（${text(activity.unitPrice) || '—'}／${text(item.unitPrice) || '—'}）`;
   if (!sameValues(activity.fee, item.fee) || !sameValues((activity as ActivityImport & { tax?: unknown }).tax, item.tax)) return '同日同標的，但費用或稅額不同';
@@ -202,30 +233,34 @@ function keys(
   const type = text(activity.activityType).toUpperCase();
   const isCash = CASH_TYPES.has(type);
   const currency = text(activity.currency).toUpperCase();
-  const common = [
-    accountId,
-    dateOnly(activity.date, timezone),
-    type,
-    normalizedSubtype(activity.subtype),
-    currency,
-  ];
+  const dates = [dateOnly(activity.date, timezone)];
   if (isCash) {
     // Keep a missing amount distinct from an explicit zero. Wealthfolio 3.8
     // treats these differently during review and migration.
     const amountField = hasExplicitAmount(activity) ? field(activity.amount) : 'MISSING';
-    const base = [...common, amountField, zeroField(activity.fee), zeroField((activity as ExistingActivityForDedupe).tax)];
-    const result = [base.join('|')];
-    // Keep a more specific key as a secondary candidate when the broker
-    // provides a ticker. The amount-only key remains the fallback for older
-    // DB rows whose cash activity is attached to a different asset (or none).
-    for (const asset of assetKeys(activity)) result.push([...common, asset, ...base.slice(common.length)].join('|'));
+    const result: string[] = [];
+    // The generic key supports older rows with a missing symbol; the matching
+    // guard below rejects it when both sides identify different symbols.
+    for (const date of dates) {
+      const base = [accountId, date, type, normalizedSubtype(activity.subtype), currency];
+      const economics = [amountField, zeroField(activity.fee), zeroField((activity as ExistingActivityForDedupe).tax)];
+      result.push([...base, ...economics].join('|'));
+      for (const asset of assetKeys(activity)) result.push([...base, asset, ...economics].join('|'));
+    }
     return [...new Set(result)];
+  }
+  if (type === 'SPLIT') {
+    const amount = hasExplicitAmount(activity) ? field(activity.amount) : 'MISSING';
+    return [...new Set(dates.flatMap((date) => assetKeys(activity).map((asset) =>
+      [accountId, date, type, normalizedSubtype(activity.subtype), currency, asset, amount].join('|'))))];
   }
   const cost = totalCost(activity).toString();
   const result: string[] = [];
-  for (const asset of assetKeys(activity)) {
-    for (const settlement of tradeSettlementKeys(activity, role, type, currency)) {
-      result.push([...common, asset, field(activity.quantity), cost, settlement].join('|'));
+  for (const date of dates) {
+    for (const asset of assetKeys(activity)) {
+      for (const settlement of tradeSettlementKeys(activity, role, type, currency)) {
+        result.push([accountId, date, type, normalizedSubtype(activity.subtype), currency, asset, field(activity.quantity), cost, settlement].join('|'));
+      }
     }
   }
   return [...new Set(result)];

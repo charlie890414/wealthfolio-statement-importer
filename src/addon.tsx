@@ -21,6 +21,7 @@ const isDuplicate = (activity: ActivityImport) => Boolean(
 function ImportPage({ ctx }: { ctx: AddonContext }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState('');
+  const [cashTransferCurrency, setCashTransferCurrency] = useState('');
   const [fileName, setFileName] = useState('');
   const [broker, setBroker] = useState('');
   const [activities, setActivities] = useState<CheckedActivity[]>([]);
@@ -72,7 +73,8 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
       timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     }
     const selected = selectImportRows(visibleActivities, selectedRows);
-    const rawActivities = (rows.length ? rows : selected.map((item) => item.source)).map((row, index) => activityFromSource(row, selected[index]?.lineNumber ?? index + 1, id, timezone));
+    const cashTransferMarketCurrency = cashTransferCurrency || accounts.find((account) => account.id === id)?.currency;
+    const rawActivities = (rows.length ? rows : selected.map((item) => item.source)).map((row, index) => activityFromSource(row, selected[index]?.lineNumber ?? index + 1, id, timezone, cashTransferMarketCurrency));
     const checked = await checkImportInBatches(rawActivities, (batch) => ctx.api.activities.checkImport(batch), (completed, total) => setMessage(`驗證中：已完成 ${completed} / ${total} 筆活動…`));
     // The host may omit addon-only metadata such as lineNumber from its
     // response. Restore the submitted row identity by position before
@@ -177,7 +179,7 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   async function useSymbol(sourceSymbol: string) {
     const symbol = symbolQuery.trim();
     if (!symbol) return;
-    const rows = activities.map((item) => item.source.sourceSymbol === sourceSymbol ? { ...item.source, symbol, sourceSymbol } : item.source);
+    const rows = activities.map((item) => item.source.sourceSymbol === sourceSymbol ? { ...item.source, symbol, sourceSymbol, exchangeMic: undefined, quoteCcy: undefined, providerId: undefined, providerSymbol: undefined, symbolName: undefined } : item.source);
     setBusy(true); setEditingSymbol(''); setSymbolResults([]); invalidateValidation();
     try {
       const nextMapping = { ...(mapping ?? { accountId, fieldMappings: {}, activityMappings: {}, symbolMappings: {}, accountMappings: {} }), accountId, symbolMappings: { ...(mapping?.symbolMappings ?? {}), [sourceSymbol]: symbol } };
@@ -221,9 +223,25 @@ function ImportPage({ ctx }: { ctx: AddonContext }) {
   return <div className="mx-auto max-w-7xl space-y-5 p-6">
     <div><h1 className="text-2xl font-semibold">對帳單匯入 <span className="text-sm text-muted-foreground">v1.1.1</span></h1><p className="mt-1 text-muted-foreground">支援富邦複委託、永豐、Schwab、基富通與中信 ESPP。</p></div>
     <Card><CardContent className="space-y-4 p-5">
-      <label className="block font-medium">1. 選擇 Wealthfolio 帳戶<select className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background" value={accountId} onChange={(event) => { setAccountId(event.target.value); setActivities([]); setSelectedRows(new Set()); setFileName(''); setBroker(''); setIssues([]); setImportResult(''); setDateFrom(''); setDateTo(''); invalidateValidation(); }} disabled={busy}>
+      <label className="block font-medium">1. 選擇 Wealthfolio 帳戶<select className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background" value={accountId} onChange={(event) => { setAccountId(event.target.value); setCashTransferCurrency(''); setActivities([]); setSelectedRows(new Set()); setFileName(''); setBroker(''); setIssues([]); setImportResult(''); setDateFrom(''); setDateTo(''); invalidateValidation(); }} disabled={busy}>
         <option value="">請選擇帳戶</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}（{account.currency}）</option>)}
       </select></label>
+      <label className="block font-medium">
+        純現金出入金寫入時間
+        <select
+          className="mt-2 block w-full max-w-lg border rounded px-3 py-2 bg-background"
+          value={cashTransferCurrency}
+          onChange={(event) => {
+            setCashTransferCurrency(event.target.value);
+            invalidateValidation();
+          }}
+          disabled={!accountId || busy}
+        >
+          <option value="">跟隨帳戶預設幣別{selectedAccount ? `（${selectedAccount.currency}）` : ''}</option>
+          <option value="TWD">台股開盤（台北 09:00）</option>
+          <option value="USD">美股開盤（美東 09:30）</option>
+        </select>
+      </label>
       <label className="block font-medium" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>2. 上傳 CSV
         <span className="mt-2 flex min-h-24 cursor-pointer items-center justify-center rounded border-2 border-dashed p-5 text-sm text-muted-foreground">{fileName || '拖放 CSV 到這裡，或點擊選擇檔案'}<input className="sr-only" type="file" accept=".csv,text/csv" onChange={onFileChange} disabled={!accountId || busy} /></span>
       </label>

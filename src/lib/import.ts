@@ -26,8 +26,32 @@ export function dateInRange(date: string, from = '', to = ''): boolean {
   return (!from || value >= from) && (!to || value <= to);
 }
 
-/** Converts a broker calendar date to the instant representing midnight in an IANA timezone. */
-export function dateAtLocalMidnight(date: string, timezone: string): string {
+const US_OPEN = { timezone: 'America/New_York', hour: 9, minute: 30 };
+const TAIWAN_OPEN = { timezone: 'Asia/Taipei', hour: 9, minute: 0 };
+const LONDON_OPEN = { timezone: 'Europe/London', hour: 8, minute: 0 };
+const MARKET_OPENS = new Map([
+  ...['XNYS', 'XNAS', 'XASE', 'ARCX', 'BATS', 'XNGS', 'XNMS', 'XNCM'].map((mic) => [mic, US_OPEN] as const),
+  ['XTAI', TAIWAN_OPEN],
+  ['ROCO', TAIWAN_OPEN],
+  ['XLON', LONDON_OPEN],
+]);
+
+function marketOpen(source: NormalizedActivity, accountCurrency?: string) {
+  const mic = source.exchangeMic?.trim().toUpperCase();
+  const symbol = source.symbol.trim().toUpperCase();
+  const exchangeOpen = mic ? MARKET_OPENS.get(mic) : undefined;
+  if (exchangeOpen) return exchangeOpen;
+  if (!mic && symbol.endsWith('.L')) return LONDON_OPEN;
+  if (!mic && /\.TWO?$/.test(symbol)) return TAIWAN_OPEN;
+
+  const isCashTransfer = !symbol && !mic && ['DEPOSIT', 'WITHDRAWAL'].includes(source.activityType);
+  const currency = ((isCashTransfer && accountCurrency) || source.currency).trim().toUpperCase();
+  if (currency === 'TWD') return TAIWAN_OPEN;
+  if (currency === 'USD') return US_OPEN;
+}
+
+/** Converts a broker calendar date and local time to an instant in an IANA timezone. */
+function dateAtLocalTime(date: string, timezone: string, hour: number, minute: number): string {
   const match = date.match(DATE_ONLY);
   if (!match) return date;
 
@@ -46,7 +70,7 @@ export function dateAtLocalMidnight(date: string, timezone: string): string {
     second: '2-digit',
     hourCycle: 'h23',
   });
-  const targetAsUtc = Date.UTC(target.year, target.month - 1, target.day);
+  const targetAsUtc = Date.UTC(target.year, target.month - 1, target.day, hour, minute);
   let candidate = targetAsUtc;
 
   // Recalculate the timezone offset at the candidate instant. Iterating also
@@ -71,12 +95,16 @@ export function activityFromSource(
   lineNumber: number,
   accountId: string,
   timezone?: string,
+  accountCurrency?: string,
 ): CheckedActivity {
+  const open = timezone ? marketOpen(source, accountCurrency) : undefined;
   return {
     accountId,
     currency: source.currency,
     activityType: source.activityType as ActivityImport['activityType'],
-    date: timezone ? dateAtLocalMidnight(source.date, timezone) : source.date,
+    date: open
+      ? dateAtLocalTime(source.date, open.timezone, open.hour, open.minute)
+      : timezone ? dateAtLocalTime(source.date, timezone, 0, 0) : source.date,
     symbol: source.symbol,
     amount: nullableDecimal(source.amount),
     quantity: nullableDecimal(source.quantity),
@@ -127,10 +155,8 @@ export function mergeCheckedActivity(activity: ActivityImport, submitted: Activi
     currency: submitted.currency,
     fee: submitted.fee,
     tax: submitted.tax,
-    // A 3.8 check response may omit an amount while validating a row. Keep
-    // the broker's explicit final settlement instead of turning it into a
-    // missing value at the merge boundary.
-    amount: submitted.amount ?? activity.amount,
+    // Never fill a missing broker amount with a host-derived value.
+    amount: submitted.amount,
     fxRate: submitted.fxRate,
     subtype: submitted.subtype,
     comment: submitted.comment,

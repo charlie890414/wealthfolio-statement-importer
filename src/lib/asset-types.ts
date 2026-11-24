@@ -3,6 +3,8 @@ import type { NormalizedActivity } from './types';
 export interface MarketAssetResult {
   symbol: string;
   canonicalSymbol?: string;
+  canonicalExchangeMic?: string;
+  exchangeMic?: string;
   providerSymbol?: string;
   currency?: string;
   quoteType?: string;
@@ -49,13 +51,13 @@ export async function resolveAssetTypesFromMarket(
   let resolved = 0;
   let failed = 0;
   const output = await Promise.all(rows.map(async (row) => {
-    if (!row.symbol) return row;
+    if (!row.symbol || row.instrumentType === 'BOND' || row.instrumentType === 'OPTION') return row;
     try {
       const result = selectExactAssetResult(row, await cache.get(row.symbol)!);
       const instrumentType = normalizedMarketAssetType(result?.quoteType);
       if (!instrumentType) return row;
       resolved += 1;
-      return { ...row, instrumentType };
+      return { ...row, instrumentType, exchangeMic: row.exchangeMic || result?.canonicalExchangeMic || result?.exchangeMic };
     } catch {
       failed += 1;
       return row;

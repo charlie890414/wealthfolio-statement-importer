@@ -49,11 +49,26 @@ describe('activity import validation batching', () => {
     expect(merged.every((row) => row.assetId === 'asset-009826' && row.exchangeMic === 'XTAI')).toBe(true);
   });
 
-  it('submits a date as midnight in the configured local timezone', () => {
+  it('writes stock trades at the exchange opening time on the broker date', () => {
     const source = convert('fubon', [{ 市場: 'TW', 買賣: 'B', 代碼: '0050', 名稱: 'ETF', 股數: '1', 價格: '1', 價金: '1', 手續費: '0', 處理費: '0', 交易費: '0', 結算費: '0', 交易稅: '0', 印花稅: '0', 應收付: '-1', 幣別: 'TWD', 交割日: '20260729' }]).activities[0];
     const imported = activityFromSource(source, 2, 'account', 'Asia/Taipei');
 
-    expect(imported.date).toBe('2026-07-28T16:00:00.000Z');
+    expect(imported.date).toBe('2026-07-29T01:00:00.000Z');
+
+    const us = { ...source, symbol: 'VOO', exchangeMic: 'ARCX', currency: 'USD' };
+    expect(activityFromSource(us, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T13:30:00.000Z');
+    expect(activityFromSource({ ...us, date: '2026-01-29' }, 2, 'account', 'Asia/Taipei').date).toBe('2026-01-29T14:30:00.000Z');
+    expect(activityFromSource({ ...us, exchangeMic: 'XLON' }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T07:00:00.000Z');
+    expect(activityFromSource({ ...us, exchangeMic: 'XETR', currency: 'EUR' }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-28T16:00:00.000Z');
+    expect(activityFromSource({ ...us, activityType: 'DIVIDEND' }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T13:30:00.000Z');
+    expect(activityFromSource({ ...source, activityType: 'FEE', symbol: '', exchangeMic: undefined }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T01:00:00.000Z');
+    expect(activityFromSource({ ...us, activityType: 'INTEREST', symbol: '', exchangeMic: undefined }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T13:30:00.000Z');
+    expect(activityFromSource({ ...us, activityType: 'DEPOSIT', exchangeMic: 'XLON' }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T07:00:00.000Z');
+    expect(activityFromSource({ ...us, activityType: 'WITHDRAWAL', symbol: '0050.TW', exchangeMic: undefined }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T01:00:00.000Z');
+    expect(activityFromSource({ ...us, activityType: 'WITHDRAWAL', symbol: '', exchangeMic: undefined }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T13:30:00.000Z');
+    expect(activityFromSource({ ...source, activityType: 'DEPOSIT', symbol: '', exchangeMic: undefined }, 2, 'account', 'Asia/Taipei').date).toBe('2026-07-29T01:00:00.000Z');
+    expect(activityFromSource({ ...us, activityType: 'DEPOSIT', symbol: '', exchangeMic: undefined }, 2, 'account', 'Asia/Taipei', 'TWD')).toMatchObject({ date: '2026-07-29T01:00:00.000Z', currency: 'USD' });
+    expect(activityFromSource({ ...us, activityType: 'WITHDRAWAL' }, 2, 'account', 'Asia/Taipei', 'TWD').date).toBe('2026-07-29T13:30:00.000Z');
   });
 
   it('preserves explicit zero fields and source amount when host validation omits it', () => {
@@ -63,7 +78,7 @@ describe('activity import validation batching', () => {
     };
     const imported = activityFromSource(source, 2, 'account');
     expect(imported).toMatchObject({ quantity: '0', unitPrice: '0', fee: '0', amount: '0' });
-    expect(mergeCheckedActivity(imported, { ...imported, amount: null })).toMatchObject({ amount: '0' });
+    expect(mergeCheckedActivity(imported, { ...imported, amount: null })).toMatchObject({ amount: null });
   });
 
   it('keeps row selection separate from validation input', () => {
@@ -211,18 +226,19 @@ describe('broker converters', () => {
     ]);
     expect(result.issues).toHaveLength(0);
     expect(result.activities[0].symbol).toBe('UUUU261120P00012000');
-    expect(result.activities[0].subtype).toBe('OPTION_OPEN');
+    expect(result.activities[0].subtype).toBe('POSITION_OPEN');
     expect(result.activities[1].activityType).toBe('DIVIDEND');
   });
 
-  it('merges same-day Schwab trades with the same amount', () => {
+  it('preserves separate same-day Schwab trades with the same amount', () => {
     const result = convert('schwab', [
       { Date: '08/21/2026', Action: 'Buy', Symbol: 'AAPL', Description: 'fill 1', Quantity: '1', Price: '$100', 'Fees & Comm': '$1', Amount: '-$101' },
       { Date: '08/21/2026', Action: 'Buy', Symbol: 'AAPL', Description: 'fill 2', Quantity: '1', Price: '$100', 'Fees & Comm': '$1', Amount: '-$101' },
       { Date: '08/21/2026', Action: 'Buy', Symbol: 'AAPL', Description: 'different amount', Quantity: '2', Price: '$50', 'Fees & Comm': '$0', Amount: '-$100' },
     ]);
-    expect(result.activities).toHaveLength(2);
-    expect(result.activities[0]).toMatchObject({ quantity: '2', unitPrice: '100', fee: '2', amount: '202' });
+    expect(result.activities).toHaveLength(3);
+    expect(result.activities[0]).toMatchObject({ quantity: '1', unitPrice: '100', fee: '1', amount: '101' });
+    expect(result.activities[1]).toMatchObject({ quantity: '1', unitPrice: '100', fee: '1', amount: '101' });
   });
 
   it('uses currency rounding before correcting broker trade prices', () => {
@@ -287,14 +303,14 @@ describe('broker converters', () => {
     expect(result.activities).toHaveLength(0);
   });
 
-  it('keeps unmatched Schwab internal transfers', () => {
+  it('rejects unmatched security transfers instead of inventing cash', () => {
     const result = convert('schwab', [{
       Date: '05/14/2024', Action: 'Internal Transfer', Symbol: 'VOO', Description: 'Unrelated transfer',
       Quantity: '1', Price: '', 'Fees & Comm': '', Amount: '',
     }]);
 
-    expect(result.activities).toHaveLength(1);
-    expect(result.activities[0]).toMatchObject({ activityType: 'DEPOSIT', symbol: 'VOO', quantity: '1' });
+    expect(result.activities).toEqual([]);
+    expect(result.issues.some((issue) => issue.severity === 'error')).toBe(true);
   });
 
   it('excludes reusable Taiwan warrant symbols but keeps ETF symbols', () => {
@@ -320,15 +336,17 @@ describe('broker converters', () => {
     expect(result.activities[0]).toMatchObject({ activityType: 'DIVIDEND', symbol: 'VOO', amount: '1.58' });
   });
 
-  it('matches the DB baseline for T-bills by keeping only maturity gains', () => {
+  it('maps bond face units and imports par maturity without deriving cash', () => {
     const result = convert('schwab', [
       { Date: '06/20/2024', Action: 'Buy', Symbol: '912797KF3', Description: 'US TREASURY BILL', Quantity: '12000', Price: '$99.5901', 'Fees & Comm': '', Amount: '-$11950.81' },
       { Date: '06/18/2024', Action: 'Full Redemption Adj', Symbol: '912797KF3', Description: 'US TREASURY BILXXX**MATURED**', Quantity: '', Price: '', 'Fees & Comm': '', Amount: '$12000.00' },
       { Date: '06/18/2024', Action: 'Full Redemption', Symbol: '912797KF3', Description: 'US TREASURY BILXXX**MATURED**', Quantity: '-12,000', Price: '', 'Fees & Comm': '', Amount: '' },
     ]);
-    expect(result.issues).toHaveLength(0);
-    expect(result.activities).toHaveLength(1);
-    expect(result.activities[0]).toMatchObject({ activityType: 'DEPOSIT', amount: '49.19', symbol: '', comment: 'US TREASURY BILXXX**MATURED** | BOND matured -> gain (new funds)' });
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].severity).toBe('warning');
+    expect(result.activities).toHaveLength(2);
+    expect(result.activities[0]).toMatchObject({ quantity: '120', unitPrice: '99.5901', amount: '11950.81', instrumentType: 'BOND' });
+    expect(result.activities[1]).toMatchObject({ activityType: 'SELL', quantity: '120', unitPrice: '100', amount: '12000' });
   });
 
   it('converts Fundrich buy with paired cash activity and skips failures', () => {
@@ -339,14 +357,14 @@ describe('broker converters', () => {
 
   it('converts CTBC ESPP purchases for importing into a selected brokerage account', () => {
     const result = convert('ctbc_espp', [
-      { 買入日期: '2026/09/01', 股數: '7', 均價: '2404.3453', 標的: '2330 台積電' },
-      { 買入日期: '2026/08/03', 股數: '7', 均價: '2365.0900', 標的: '2330 台積電' },
+      { 買入日期: '2026/09/01', 股數: '7', 均價: '2404.3453', 申購金額: '16830', 標的: '2330 台積電' },
+      { 買入日期: '2026/08/03', 股數: '7', 均價: '2365.0900', 申購金額: '16556', 標的: '2330 台積電' },
     ]);
 
     expect(result.issues).toHaveLength(0);
     expect(result.activities).toEqual([
-      expect.objectContaining({ date: '2026-09-01', symbol: '2330', activityType: 'BUY', quantity: '7', unitPrice: '2404.3453', currency: 'TWD', amount: '16830.4171', comment: 'CTBC ESPP | 2330 台積電' }),
-      expect.objectContaining({ date: '2026-08-03', symbol: '2330', activityType: 'BUY', quantity: '7', unitPrice: '2365.09', currency: 'TWD', amount: '16555.63' }),
+      expect.objectContaining({ date: '2026-09-01', symbol: '2330', activityType: 'BUY', quantity: '7', unitPrice: '2404.3453', currency: 'TWD', amount: '16830', comment: 'CTBC ESPP | 2330 台積電' }),
+      expect.objectContaining({ date: '2026-08-03', symbol: '2330', activityType: 'BUY', quantity: '7', unitPrice: '2365.09', currency: 'TWD', amount: '16556' }),
     ]);
   });
 
@@ -508,6 +526,75 @@ describe('economic duplicate matching', () => {
       assetId: 'voo-asset', assetSymbol: 'VOO', quantity: 1, unitPrice: 1, amount: 1.58, currency: 'USD',
     }], 'account');
     expect(result[0].duplicateOfId).toBe('old');
+  });
+
+  it('matches dividends without comparing blank import prices to host placeholders', () => {
+    const row = imported('new', 'Cash Dividend (SPYM)');
+    row.activityType = 'DIVIDEND';
+    row.currency = 'USD';
+    row.symbol = 'SPYM';
+    row.quantity = null;
+    row.unitPrice = null;
+    row.fee = null;
+    row.amount = '86.32';
+    const result = markExistingDuplicates([row], [{
+      id: 'old', accountId: 'account', activityType: 'DIVIDEND', date: '2026-07-29',
+      assetSymbol: 'SPYM', quantity: 1, unitPrice: 1, amount: 86.32, currency: 'USD',
+    }], 'account');
+    expect(result[0].duplicateOfId).toBe('old');
+  });
+
+  it('does not match equal cash amounts belonging to different known symbols', () => {
+    const row = imported('new', 'Dividend (SPYM)');
+    row.activityType = 'DIVIDEND';
+    row.currency = 'USD';
+    row.symbol = 'SPYM';
+    row.quantity = null;
+    row.unitPrice = null;
+    row.amount = '1';
+    const result = markExistingDuplicates([row], [{
+      id: 'old', accountId: 'account', activityType: 'DIVIDEND', date: '2026-07-29',
+      assetSymbol: 'QQQ', quantity: 1, unitPrice: 1, amount: 1, currency: 'USD',
+    }], 'account');
+    expect(result[0].duplicateOfId).toBeUndefined();
+    expect(sameDayNonDuplicateReason(row, [{
+      id: 'old', accountId: 'account', activityType: 'DIVIDEND', date: '2026-07-29',
+      assetSymbol: 'QQQ', amount: 1, currency: 'USD',
+    }], 'account')).toBeUndefined();
+  });
+
+  it('matches splits by symbol, date, and ratio regardless of source delivery quantity or price', () => {
+    const row = imported('new', 'Stock Split');
+    row.activityType = 'SPLIT';
+    row.quantity = null;
+    row.unitPrice = null;
+    row.fee = null;
+    row.amount = '8';
+    const result = markExistingDuplicates([row], [{
+      id: 'old', accountId: 'account', activityType: 'SPLIT', date: '2026-07-29',
+      assetSymbol: '0050', quantity: 14, unitPrice: 94.395, amount: 8, currency: 'USD',
+    }], 'account');
+    expect(result[0].duplicateOfId).toBe('old');
+  });
+
+  it('uses only the primary Schwab date when matching duplicates', () => {
+    const converted = convert('schwab', [{
+      Date: '11/23/2026 as of 11/20/2026', Action: 'Cash Dividend', Symbol: 'SPYM',
+      Description: 'SPYM dividend', Quantity: '', Price: '', Amount: '$1.50',
+    }]).activities[0];
+    const submitted = activityFromSource(converted, 1, 'account');
+    const checked = mergeCheckedActivity(submitted, submitted);
+    expect(checked.date).toBe('2026-11-23');
+    const asOfOnly = markExistingDuplicates([checked], [{
+      id: 'old', accountId: 'account', activityType: 'DIVIDEND', date: '2026-11-20',
+      assetSymbol: 'SPYM', quantity: 1, unitPrice: 1, amount: 1.5, currency: 'USD',
+    }], 'account');
+    const primaryDate = markExistingDuplicates([checked], [{
+      id: 'newer', accountId: 'account', activityType: 'DIVIDEND', date: '2026-11-23',
+      assetSymbol: 'SPYM', quantity: 1, unitPrice: 1, amount: 1.5, currency: 'USD',
+    }], 'account');
+    expect(asOfOnly[0].duplicateOfId).toBeUndefined();
+    expect(primaryDate[0].duplicateOfId).toBe('newer');
   });
 
   it('matches an unresolved option by its normalized description', () => {
