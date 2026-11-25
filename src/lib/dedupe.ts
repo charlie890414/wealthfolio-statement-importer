@@ -252,7 +252,8 @@ function keys(
   if (type === 'SPLIT') {
     const amount = hasExplicitAmount(activity) ? field(activity.amount) : 'MISSING';
     return [...new Set(dates.flatMap((date) => assetKeys(activity).map((asset) =>
-      [accountId, date, type, normalizedSubtype(activity.subtype), currency, asset, amount].join('|'))))];
+      // A split ratio is unitless; source and stored quote currencies are irrelevant.
+      [accountId, date, type, normalizedSubtype(activity.subtype), asset, amount].join('|'))))];
   }
   const cost = totalCost(activity).toString();
   const result: string[] = [];
